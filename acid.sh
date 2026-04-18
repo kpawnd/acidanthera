@@ -28,6 +28,21 @@ print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
+print_info_inline() {
+    # Refreshes the same terminal line for long-running progress updates.
+    if [[ -t 1 ]]; then
+        printf "\r\033[2K${BLUE}[INFO]${NC} %s" "$1"
+    else
+        print_info "$1"
+    fi
+}
+
+clear_inline_status() {
+    if [[ -t 1 ]]; then
+        printf "\r\033[2K"
+    fi
+}
+
 run_step() {
     local step_name="$1"
     shift
@@ -309,6 +324,14 @@ remove_deepfreeze_and_faronics() {
 
     local matches_found=0
     local entry
+    local use_python_scanner=0
+
+    if command -v python3 >/dev/null 2>&1; then
+        use_python_scanner=1
+        print_info "Using Python scanner for faster traversal and cleaner progress updates."
+    else
+        print_warn "python3 not found; using bash scanner fallback."
+    fi
 
     for root in "${search_roots[@]}"; do
         if [[ ! -d "$root" ]]; then
@@ -317,36 +340,78 @@ remove_deepfreeze_and_faronics() {
 
         print_info "Scanning root: $root"
 
-        for entry in "$root"/* "$root"/.*; do
-            [[ ! -e "$entry" ]] && continue
-            [[ "$entry" == "$root/." || "$entry" == "$root/.." ]] && continue
-
-            print_info "Scanning path: $entry"
-
+        if [[ "$use_python_scanner" -eq 1 ]]; then
             while IFS= read -r path; do
                 [[ -z "$path" ]] && continue
                 matches_found=$((matches_found + 1))
+                clear_inline_status
                 print_info "Deleting: $path"
                 if ! sudo rm -rf "$path"; then
                     print_warn "Could not delete: $path"
                     had_error=1
                 fi
             done < <(
-                find "$entry" -xdev \( -iname '*faronics*' -o -iname '*deep*freeze*' -o -iname '*deepfreeze*' \) 2>/dev/null
-            )
-        done
+                python3 - "$root" <<'PY'
+import os
+import re
+import sys
 
-        while IFS= read -r path; do
-            [[ -z "$path" ]] && continue
-            matches_found=$((matches_found + 1))
-            print_info "Deleting: $path"
-            if ! sudo rm -rf "$path"; then
-                print_warn "Could not delete: $path"
-                had_error=1
-            fi
-        done < <(
-            find "$root" -maxdepth 1 -xdev \( -iname '*faronics*' -o -iname '*deep*freeze*' -o -iname '*deepfreeze*' \) 2>/dev/null
-        )
+root = sys.argv[1]
+pattern = re.compile(r"faronics|deep[\s_-]*freeze|deepfreeze", re.IGNORECASE)
+
+for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+    sys.stderr.write(f"\r\033[2K\033[0;34m[INFO]\033[0m Scanning path: {dirpath}")
+    sys.stderr.flush()
+
+    base = os.path.basename(dirpath)
+    if pattern.search(base):
+        print(dirpath)
+
+    for fname in filenames:
+        if pattern.search(fname):
+            print(os.path.join(dirpath, fname))
+
+sys.stderr.write("\r\033[2K")
+sys.stderr.flush()
+PY
+            )
+        else
+            for entry in "$root"/* "$root"/.*; do
+                [[ ! -e "$entry" ]] && continue
+                [[ "$entry" == "$root/." || "$entry" == "$root/.." ]] && continue
+
+                print_info_inline "Scanning path: $entry"
+
+                while IFS= read -r path; do
+                    [[ -z "$path" ]] && continue
+                    matches_found=$((matches_found + 1))
+                    clear_inline_status
+                    print_info "Deleting: $path"
+                    if ! sudo rm -rf "$path"; then
+                        print_warn "Could not delete: $path"
+                        had_error=1
+                    fi
+                done < <(
+                    find "$entry" -xdev \( -iname '*faronics*' -o -iname '*deep*freeze*' -o -iname '*deepfreeze*' \) 2>/dev/null
+                )
+            done
+
+            while IFS= read -r path; do
+                [[ -z "$path" ]] && continue
+                matches_found=$((matches_found + 1))
+                clear_inline_status
+                print_info "Deleting: $path"
+                if ! sudo rm -rf "$path"; then
+                    print_warn "Could not delete: $path"
+                    had_error=1
+                fi
+            done < <(
+                find "$root" -maxdepth 1 -xdev \( -iname '*faronics*' -o -iname '*deep*freeze*' -o -iname '*deepfreeze*' \) 2>/dev/null
+            )
+        fi
+
+        clear_inline_status
+        print_info "Completed root scan: $root"
     done
 
     print_info "Recursive scan complete. Matches found: $matches_found"
@@ -551,6 +616,7 @@ ensure_bash_alias() {
 
 install_and_configure_skhd() {
     local had_error=0
+    local skhd_formula="koekeishiya/formulae/skhd"
 
     print_info "Installing and configuring skhd for hotkey trigger..."
 
@@ -565,9 +631,19 @@ install_and_configure_skhd() {
     fi
 
     if ! brew list --formula skhd >/dev/null 2>&1; then
-        if ! brew install skhd; then
-            print_warn "Failed to install skhd."
-            return 1
+        print_info "Adding tap for skhd formula..."
+        if ! brew tap koekeishiya/formulae >/dev/null 2>&1; then
+            print_warn "Failed to add koekeishiya/formulae tap."
+        fi
+
+        print_info "Installing skhd from tap..."
+        if ! brew install "$skhd_formula"; then
+            print_warn "Primary skhd install failed. Trying HEAD build."
+            if ! brew install --HEAD "$skhd_formula"; then
+                print_warn "Failed to install skhd from koekeishiya/formulae."
+                print_warn "Homebrew cannot find the formula in current repositories."
+                return 1
+            fi
         fi
     fi
 
