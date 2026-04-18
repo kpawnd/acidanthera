@@ -34,7 +34,7 @@ main() {
     run_step "Configure bash alias" ensure_bash_alias
     run_step "Configure power management" configure_power_management
     run_step "Apply performance tweaks" configure_performance_tweaks
-    run_step "Install required software" install_required_software
+    run_step_interactive "Install required software" install_required_software
 
     print_summary
 }

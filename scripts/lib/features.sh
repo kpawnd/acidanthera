@@ -373,6 +373,59 @@ verify_required_software_present() {
     return 0
 }
 
+render_app_install_progress() {
+    local current="$1"
+    local total="$2"
+    local label="$3"
+    local width=28
+    local pct=0
+    local filled=0
+    local empty=0
+    local bar
+
+    if [[ "$total" -gt 0 ]]; then
+        pct=$(( (current * 100) / total ))
+    fi
+
+    filled=$(( (pct * width) / 100 ))
+    empty=$(( width - filled ))
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+
+    printf "\r\033[2K${BLUE}[INSTALL]${NC} [%s] %3d%% - %s" "$bar" "$pct" "$label"
+}
+
+download_file_optimized() {
+    local url="$1"
+    local out_file="$2"
+
+    if command -v aria2c >/dev/null 2>&1; then
+        aria2c \
+            --file-allocation=none \
+            --max-connection-per-server=8 \
+            --split=8 \
+            --continue=true \
+            --retry-wait=3 \
+            --max-tries=8 \
+            --summary-interval=1 \
+            -o "$(basename "$out_file")" \
+            -d "$(dirname "$out_file")" \
+            "$url"
+        return $?
+    fi
+
+    curl \
+        --fail \
+        --location \
+        --retry 8 \
+        --retry-all-errors \
+        --retry-delay 2 \
+        --connect-timeout 15 \
+        --continue-at - \
+        --progress-bar \
+        "$url" \
+        --output "$out_file"
+}
+
 install_packet_tracer() {
     local dmg_url=""
     local dmg_file="/tmp/cisco_packet_tracer.dmg"
@@ -393,7 +446,7 @@ install_packet_tracer() {
 
     print_info "Using Packet Tracer DMG URL: $dmg_url"
 
-    if ! curl -fL "$dmg_url" -o "$dmg_file"; then
+    if ! download_file_optimized "$dmg_url" "$dmg_file"; then
         print_warn "Failed to download Cisco Packet Tracer DMG."
         return 1
     fi
@@ -492,16 +545,30 @@ PY
 
 install_required_software() {
     local had_error=0
+    local total_tasks=4
+    local current_task=0
 
     print_info "Installing required software set..."
 
     repair_homebrew_environment || true
 
+    current_task=$((current_task + 1))
+    render_app_install_progress "$current_task" "$total_tasks" "Installing Blender"
     reinstall_cask_app "blender" "/Applications/Blender.app" "Blender" || had_error=1
+
+    current_task=$((current_task + 1))
+    render_app_install_progress "$current_task" "$total_tasks" "Installing Android Studio"
     reinstall_cask_app "android-studio" "/Applications/Android Studio.app" "Android Studio" || had_error=1
+
+    current_task=$((current_task + 1))
+    render_app_install_progress "$current_task" "$total_tasks" "Installing Azure Data Studio"
     reinstall_cask_app "azure-data-studio" "/Applications/Azure Data Studio.app" "Azure Data Studio" || had_error=1
 
+    current_task=$((current_task + 1))
+    render_app_install_progress "$current_task" "$total_tasks" "Installing Cisco Packet Tracer"
     install_packet_tracer || had_error=1
+
+    printf "\r\033[2K"
     verify_required_software_present || had_error=1
 
     if [[ "$had_error" -eq 1 ]]; then
