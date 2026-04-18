@@ -2,11 +2,6 @@
 
 set -uo pipefail
 
-if [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] && [[ "$EUID" -ne 0 ]]; then
-    echo "[INFO] Elevating privileges once for this run..."
-    exec sudo -E bash "$0" "$@"
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACID_ROOT="$SCRIPT_DIR"
 export ACID_ROOT
@@ -38,7 +33,6 @@ main() {
     run_step "Create sysmon command" create_sysmon_command
     run_step "Configure bash alias" ensure_bash_alias
     run_step "Configure power management" configure_power_management
-    run_step "Install and configure skhd" install_and_configure_skhd
     run_step "Apply performance tweaks" configure_performance_tweaks
     run_step "Install required software" install_required_software
 

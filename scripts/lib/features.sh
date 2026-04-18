@@ -129,64 +129,57 @@ create_sysmon_command() {
 #!/bin/bash
 set -uo pipefail
 
-mode="terminal"
-if [[ "${1:-}" == "--window" ]]; then
-    mode="window"
-fi
+get_cpu_temp() {
+    if command -v osx-cpu-temp >/dev/null 2>&1; then
+        osx-cpu-temp 2>/dev/null || echo "unavailable"
+        return
+    fi
 
-report_file="/tmp/sysmon_report_$(date +%Y%m%d_%H%M%S).txt"
+    if command -v istats >/dev/null 2>&1; then
+        istats cpu temp --no-graphs 2>/dev/null | head -n 1 | sed 's/^ *//' || echo "unavailable"
+        return
+    fi
 
-{
-    echo "System Monitor Report - $(date)"
-    echo "========================================"
-    echo ""
+    if command -v powermetrics >/dev/null 2>&1; then
+        sudo -n powermetrics --samplers smc -n 1 2>/dev/null | grep -i 'CPU die temperature' | head -n 1 | sed 's/^ *//' || echo "unavailable (sudo permission required)"
+        return
+    fi
 
+    echo "unavailable"
+}
+
+print_once() {
+    echo "System Monitor - $(date)"
+    echo "=============================================="
     echo "Host: $(scutil --get ComputerName 2>/dev/null || hostname)"
     echo "Uptime: $(uptime | sed 's/^ *//')"
+    echo "CPU Temp: $(get_cpu_temp)"
     echo ""
-
-    echo "CPU"
-    echo "----------------------------------------"
-    sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+    echo "CPU Summary"
     top -l 1 | grep -E '^CPU usage:' || true
-    if command -v osx-cpu-temp >/dev/null 2>&1; then
-        echo "CPU Temp: $(osx-cpu-temp 2>/dev/null || echo unavailable)"
-    elif command -v istats >/dev/null 2>&1; then
-        echo "CPU Temp:"
-        istats cpu temp --no-graphs 2>/dev/null || echo "unavailable"
-    elif command -v powermetrics >/dev/null 2>&1; then
-        echo "CPU Temp (powermetrics):"
-        sudo -n powermetrics --samplers smc -n 1 2>/dev/null | grep -i 'CPU die temperature' || echo "unavailable (requires sudo permission)"
-    else
-        echo "CPU Temp: unavailable (install osx-cpu-temp or iStats)"
-    fi
     echo ""
-
-    echo "Memory"
-    echo "----------------------------------------"
-    vm_stat | head -n 8 || true
+    echo "Memory Summary"
+    vm_stat | head -n 6 || true
     echo ""
-
     echo "Disk"
-    echo "----------------------------------------"
     df -h / || true
     echo ""
+    echo "Top Processes (CPU)"
+    ps -Ao pid,ppid,%cpu,%mem,comm -r | head -n 12
+}
 
-    echo "Battery"
-    echo "----------------------------------------"
-    pmset -g batt || true
-    echo ""
-
-    echo "Network"
-    echo "----------------------------------------"
-    networksetup -listallhardwareports 2>/dev/null | grep -E 'Hardware Port|Device:' || true
-} > "$report_file"
-
-if [[ "$mode" == "window" ]]; then
-    open -a TextEdit "$report_file"
-else
-    cat "$report_file"
+if [[ "${1:-}" == "--once" ]]; then
+    print_once
+    exit 0
 fi
+
+while true; do
+    clear
+    print_once
+    echo ""
+    echo "Refreshing every 2 seconds. Press Ctrl+C to exit."
+    sleep 2
+done
 EOF
 
     chmod +x "$target_file" || return 1
@@ -219,102 +212,7 @@ ensure_bash_alias() {
 }
 
 install_and_configure_skhd() {
-    local had_error=0
-    local skhd_formula="koekeishiya/formulae/skhd"
-
-    print_info "Installing and configuring skhd for hotkey trigger..."
-
-    if ! ensure_git_installed; then
-        print_warn "git is unavailable; skipping skhd setup."
-        return 1
-    fi
-
-    repair_homebrew_environment || true
-
-    if ! brew_is_healthy; then
-        print_warn "Homebrew is unavailable or unhealthy; skipping skhd setup."
-        return 1
-    fi
-
-    if ! brew list --formula skhd >/dev/null 2>&1; then
-        print_info "Adding tap for skhd formula..."
-        if ! brew tap koekeishiya/formulae >/dev/null 2>&1; then
-            print_warn "Failed to add koekeishiya/formulae tap."
-        fi
-
-        print_info "Installing skhd from tap..."
-        if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install "$skhd_formula"; then
-            print_warn "Primary skhd install failed. Trying HEAD build."
-            repair_homebrew_environment || true
-            if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --HEAD "$skhd_formula"; then
-                print_warn "Failed to install skhd from koekeishiya/formulae."
-                print_warn "Homebrew cannot find the formula in current repositories."
-                return 1
-            fi
-        fi
-    fi
-
-    local skhd_bin
-    skhd_bin="$(brew --prefix)/bin/skhd"
-
-    if ! cat > "$HOME/.skhdrc" <<'EOF'
-# Launch system monitor in Terminal with Option+Command+Shift+S
-alt + cmd + shift - s : /usr/bin/osascript -e 'tell application "Terminal" to activate' -e 'tell application "Terminal" to do script "sysmon"'
-EOF
-    then
-        print_warn "Could not write ~/.skhdrc"
-        had_error=1
-    fi
-
-    local plist_dir="$HOME/Library/LaunchAgents"
-    local plist_file="$plist_dir/com.acidanthera.sysmon.skhd.plist"
-
-    mkdir -p "$plist_dir" || {
-        print_warn "Could not create LaunchAgents directory."
-        return 1
-    }
-
-    if ! cat > "$plist_file" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.acidanthera.sysmon.skhd</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$skhd_bin</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>$HOME/Library/Logs/skhd.log</string>
-    <key>StandardErrorPath</key>
-    <string>$HOME/Library/Logs/skhd.error.log</string>
-</dict>
-</plist>
-EOF
-    then
-        print_warn "Could not write skhd LaunchAgent plist."
-        return 1
-    fi
-
-    launchctl unload "$plist_file" >/dev/null 2>&1 || true
-    if ! launchctl load "$plist_file"; then
-        print_warn "Could not load skhd LaunchAgent."
-        had_error=1
-    fi
-
-    print_ok "skhd hotkey service configured."
-    print_warn "Grant Accessibility permission to skhd in System Settings > Privacy & Security > Accessibility."
-    print_ok "Hotkey set: Option + Command + Shift + S"
-
-    if [[ "$had_error" -eq 1 ]]; then
-        return 1
-    fi
-
+    print_info "Sysmon hotkey setup is disabled by configuration."
     return 0
 }
 
@@ -322,7 +220,7 @@ get_brew_cask_version() {
     local token="$1"
     local json
 
-    json="$(brew info --cask --json=v2 "$token" 2>/dev/null || true)"
+    json="$(brew_cmd info --cask --json=v2 "$token" 2>/dev/null || true)"
     if [[ -z "$json" ]]; then
         echo "unknown"
         return 0
@@ -380,6 +278,8 @@ reinstall_cask_app() {
     local app_path="$2"
     local display_name="$3"
     local supported_ver
+    local attempt=1
+    local max_attempts=2
 
     if ! brew_is_healthy; then
         print_warn "Homebrew unavailable; cannot install $display_name."
@@ -387,19 +287,36 @@ reinstall_cask_app() {
     fi
 
     supported_ver="$(get_brew_cask_version "$token")"
+    if [[ "$supported_ver" == "unknown" ]]; then
+        print_warn "$display_name cask metadata is unavailable for this Homebrew/macOS state."
+    fi
     print_info "$display_name supported cask version for this macOS: $supported_ver"
 
     print_info "Removing old $display_name version (if present)..."
-    brew uninstall --cask --force "$token" >/dev/null 2>&1 || true
+    brew_cmd uninstall --cask --force "$token" >/dev/null 2>&1 || true
     if [[ -d "$app_path" ]]; then
         if ! sudo rm -rf "$app_path"; then
             print_warn "Could not remove old app bundle: $app_path"
         fi
     fi
 
-    print_info "Installing latest supported $display_name..."
-    if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$token"; then
-        print_warn "Failed to install $display_name via cask $token."
+    while [[ "$attempt" -le "$max_attempts" ]]; do
+        print_info "Installing latest supported $display_name... (attempt $attempt/$max_attempts)"
+        if HOMEBREW_NO_AUTO_UPDATE=1 brew_cmd install --cask "$token"; then
+            break
+        fi
+
+        if [[ "$attempt" -lt "$max_attempts" ]]; then
+            print_warn "Install attempt failed for $display_name. Repairing Homebrew and retrying once."
+            repair_homebrew_environment || true
+            brew_cmd update --force --quiet >/dev/null 2>&1 || true
+        fi
+
+        attempt=$((attempt + 1))
+    done
+
+    if [[ "$attempt" -gt "$max_attempts" ]]; then
+        print_warn "Failed to install $display_name via cask $token after retries."
         return 1
     fi
 
@@ -410,6 +327,49 @@ reinstall_cask_app() {
     fi
 
     record_cask_lock "$token" "$app_path" || true
+    return 0
+}
+
+verify_required_software_present() {
+    local had_error=0
+    local blender_app="/Applications/Blender.app"
+    local android_app="/Applications/Android Studio.app"
+    local azure_app="/Applications/Azure Data Studio.app"
+    local packet_tracer_app=""
+
+    if [[ -d "$blender_app" ]]; then
+        print_ok "Verified Blender installation."
+    else
+        print_warn "Blender is not installed at expected path: $blender_app"
+        had_error=1
+    fi
+
+    if [[ -d "$android_app" ]]; then
+        print_ok "Verified Android Studio installation."
+    else
+        print_warn "Android Studio is not installed at expected path: $android_app"
+        had_error=1
+    fi
+
+    if [[ -d "$azure_app" ]]; then
+        print_ok "Verified Azure Data Studio installation."
+    else
+        print_warn "Azure Data Studio is not installed at expected path: $azure_app"
+        had_error=1
+    fi
+
+    packet_tracer_app="$(find /Applications -maxdepth 1 -type d -name '*Packet*Tracer*.app' | head -n 1)"
+    if [[ -n "$packet_tracer_app" ]]; then
+        print_ok "Verified Cisco Packet Tracer installation: $packet_tracer_app"
+    else
+        print_warn "Cisco Packet Tracer app bundle was not found in /Applications."
+        had_error=1
+    fi
+
+    if [[ "$had_error" -eq 1 ]]; then
+        return 1
+    fi
+
     return 0
 }
 
@@ -441,7 +401,7 @@ install_packet_tracer() {
     sudo rm -rf "$mount_point" >/dev/null 2>&1 || true
     sudo mkdir -p "$mount_point" >/dev/null 2>&1 || true
 
-    if ! hdiutil attach "$dmg_file" -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
+    if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
         print_warn "Failed to mount Cisco Packet Tracer DMG."
         rm -f "$dmg_file" >/dev/null 2>&1 || true
         return 1
@@ -461,7 +421,7 @@ install_packet_tracer() {
     elif [[ -n "$app_path" ]]; then
         print_info "Copying Packet Tracer app bundle to /Applications"
         sudo rm -rf "/Applications/$(basename "$app_path")" >/dev/null 2>&1 || true
-        if ! sudo cp -R "$app_path" /Applications/; then
+        if ! sudo ditto "$app_path" "/Applications/$(basename "$app_path")" >/dev/null 2>&1; then
             print_warn "Packet Tracer app copy failed."
             hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
             rm -f "$dmg_file" >/dev/null 2>&1 || true
@@ -542,6 +502,7 @@ install_required_software() {
     reinstall_cask_app "azure-data-studio" "/Applications/Azure Data Studio.app" "Azure Data Studio" || had_error=1
 
     install_packet_tracer || had_error=1
+    verify_required_software_present || had_error=1
 
     if [[ "$had_error" -eq 1 ]]; then
         return 1
@@ -574,14 +535,14 @@ print_summary() {
     echo "6. AC wake enabled and Power Nap disabled."
     echo "7. System monitor command installed: ~/.local/bin/sysmon"
     echo "8. Bash alias added: sysmon"
-    echo "9. skhd service setup for Option + Command + Shift + S"
+    echo "9. Sysmon hotkey setup disabled."
     echo "10. Performance tweaks applied (Spotlight/animations/Dock)."
     echo "11. Reinstall target apps and record cask lock metadata."
     echo "12. Cisco Packet Tracer install from GitHub release tag cisco (or PACKET_TRACER_DMG_URL override)."
     echo ""
     echo "Use now:"
-    echo "- sysmon           (terminal output)"
-    echo "- sysmon --window  (opens report in TextEdit)"
+    echo "- sysmon           (live terminal monitor)"
+    echo "- sysmon --once    (single snapshot)"
     echo ""
     if [[ "$FIRMWARE_PASSWORD_CHANGED" -eq 1 ]]; then
         print_warn "Firmware password was changed. Restart is recommended before validation."

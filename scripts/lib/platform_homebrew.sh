@@ -9,6 +9,14 @@ require_macos() {
     return 0
 }
 
+brew_cmd() {
+    if [[ "$EUID" -eq 0 ]] && [[ -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" brew "$@"
+    else
+        brew "$@"
+    fi
+}
+
 ensure_admin_user() {
     local check_user="${SUDO_USER:-$USER}"
 
@@ -157,7 +165,7 @@ brew_is_healthy() {
         return 1
     fi
 
-    if brew --version >/dev/null 2>&1; then
+    if brew_cmd --version >/dev/null 2>&1; then
         return 0
     fi
 
@@ -175,7 +183,7 @@ repair_homebrew_shallow_clones() {
         return 1
     fi
 
-    brew_repo="$(brew --repository 2>/dev/null || true)"
+    brew_repo="$(brew_cmd --repository 2>/dev/null || true)"
     if [[ -z "$brew_repo" ]]; then
         if [[ -d /opt/homebrew ]]; then
             brew_repo="/opt/homebrew"
@@ -291,7 +299,7 @@ install_homebrew() {
         if command -v brew >/dev/null 2>&1; then
             print_warn "Homebrew install/update failed. Attempting shallow clone repair and retry."
             repair_homebrew_environment || true
-            brew update --force --quiet >/dev/null 2>&1 || true
+            brew_cmd update --force --quiet >/dev/null 2>&1 || true
         fi
 
         if brew_is_healthy; then
