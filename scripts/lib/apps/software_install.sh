@@ -309,16 +309,33 @@ run_packet_tracer_installer_bundle() {
     local install_log="$2"
     local installer_bin=""
 
-    installer_bin="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -perm -111 2>/dev/null | head -n 1)"
+    if [[ -x "$app_path/Contents/MacOS/installbuilder.sh" ]]; then
+        installer_bin="$app_path/Contents/MacOS/installbuilder.sh"
+    elif [[ -f "$app_path/Contents/Resources/installbuilder.sh" ]]; then
+        installer_bin="$app_path/Contents/Resources/installbuilder.sh"
+    else
+        installer_bin="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -name '*install*' -perm -111 2>/dev/null | head -n 1)"
+    fi
+
     if [[ -z "$installer_bin" ]]; then
         return 1
     fi
 
-    if sudo "$installer_bin" --mode unattended --unattendedmodeui none >>"$install_log" 2>&1; then
+    if [[ "$installer_bin" == *.sh ]]; then
+        if sudo bash "$installer_bin" --mode unattended --unattendedmodeui none --prefix /Applications >>"$install_log" 2>&1; then
+            return 0
+        fi
+        if sudo bash "$installer_bin" --mode unattended --prefix /Applications >>"$install_log" 2>&1; then
+            return 0
+        fi
+        return 1
+    fi
+
+    if sudo "$installer_bin" --mode unattended --unattendedmodeui none --prefix /Applications >>"$install_log" 2>&1; then
         return 0
     fi
 
-    if sudo "$installer_bin" --mode unattended >>"$install_log" 2>&1; then
+    if sudo "$installer_bin" --mode unattended --prefix /Applications >>"$install_log" 2>&1; then
         return 0
     fi
 
@@ -327,6 +344,8 @@ run_packet_tracer_installer_bundle() {
 
 find_installed_packet_tracer_app() {
     local candidate=""
+    local container=""
+    local nested=""
 
     while IFS= read -r candidate; do
         [[ -z "$candidate" ]] && continue
@@ -336,6 +355,19 @@ find_installed_packet_tracer_app() {
         echo "$candidate"
         return 0
     done < <(find /Applications -maxdepth 1 -type d -name '*Packet*Tracer*.app' 2>/dev/null)
+
+    while IFS= read -r container; do
+        [[ -z "$container" ]] && continue
+        nested="$(find "$container" -maxdepth 2 -type d -name '*Packet*Tracer*.app' 2>/dev/null | head -n 1)"
+        if [[ -z "$nested" ]]; then
+            continue
+        fi
+        if is_packet_tracer_installer_bundle "$nested"; then
+            continue
+        fi
+        echo "$nested"
+        return 0
+    done < <(find /Applications -maxdepth 1 -type d -name 'Cisco Packet Tracer*' 2>/dev/null)
 
     echo ""
     return 1
@@ -653,47 +685,21 @@ install_android_studio_direct() {
 resolve_azure_data_studio_url() {
     local explicit_url="${AZURE_DATA_STUDIO_URL:-}"
     local final_api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases/tags/final"
-    local api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases/latest"
-    local releases_api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases?per_page=10"
-    local cask_source=""
-    local cask_url=""
-    local fallback_url=""
+    local release_page_url="https://github.com/microsoft/azuredatastudio/releases/tag/final"
     local json=""
     local release_html=""
+    local fallback_url=""
 
     if [[ -n "$explicit_url" ]]; then
         echo "$explicit_url"
         return 0
     fi
 
-    # Prefer the Homebrew cask URL when available, since it is already curated per macOS support.
-    if brew_is_healthy; then
-        cask_source="$(brew_cmd cat --cask azure-data-studio 2>/dev/null || true)"
-        if [[ -n "$cask_source" ]]; then
-            cask_url="$(printf '%s\n' "$cask_source" | awk -F'"' '/^[[:space:]]*url ".*\.(dmg|zip)"/ {print $2; exit}')"
-            if [[ -n "$cask_url" ]] && is_supported_package_url "$cask_url"; then
-                echo "$cask_url"
-                return 0
-            fi
-        fi
-    fi
-
     json="$(curl -fsSL \
         -H 'Accept: application/vnd.github+json' \
         -H 'User-Agent: acidanthera-installer' \
         "$final_api_url" 2>/dev/null || true)"
-    if [[ -z "$json" ]]; then
-        json="$(curl -fsSL \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'User-Agent: acidanthera-installer' \
-        "$api_url" 2>/dev/null || true)"
-    fi
-    if [[ -z "$json" ]]; then
-        json="$(curl -fsSL \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'User-Agent: acidanthera-installer' \
-            "$releases_api_url" 2>/dev/null || true)"
-    fi
+
     if [[ -n "$json" ]] && command -v python3 >/dev/null 2>&1; then
         fallback_url="$(python3 - <<PY
 import json
@@ -720,49 +726,38 @@ elif isinstance(data, list):
 
 urls = [u for u in urls if u]
 
+asset_names = []
+if isinstance(data, dict):
+    for a in data.get("assets", []):
+        name = a.get("name", "")
+        url = a.get("browser_download_url", "")
+        if name and url:
+            asset_names.append((name, url))
+
 # Prefer Intel macOS packages first: azuredatastudio-macos-<version>.zip (no arm64/universal suffix).
 intel_zip = [
-    u for u in urls
-    if u.lower().endswith(".zip")
-    and "azuredatastudio-macos-" in u.lower()
-    and "arm64" not in u.lower()
-    and "universal" not in u.lower()
+    url for name, url in asset_names
+    if name.lower().startswith("azuredatastudio-macos-")
+    and name.lower().endswith(".zip")
+    and "arm64" not in name.lower()
+    and "universal" not in name.lower()
 ]
 if intel_zip:
     print(intel_zip[0])
     raise SystemExit(0)
 
 intel_dmg = [
-    u for u in urls
-    if u.lower().endswith(".dmg")
-    and "mac" in u.lower()
-    and "arm64" not in u.lower()
-    and "universal" not in u.lower()
+    url for name, url in asset_names
+    if name.lower().startswith("azuredatastudio-macos-")
+    and name.lower().endswith(".dmg")
+    and "arm64" not in name.lower()
+    and "universal" not in name.lower()
 ]
 if intel_dmg:
     print(intel_dmg[0])
     raise SystemExit(0)
 
-mac_zip = [
-    u for u in urls
-    if u.lower().endswith(".zip")
-    and "mac" in u.lower()
-    and "arm64" not in u.lower()
-    and "universal" not in u.lower()
-]
-if mac_zip:
-    print(mac_zip[0])
-    raise SystemExit(0)
-
-preferred = [
-    u for u in urls
-    if "mac" in u.lower() and (u.lower().endswith(".dmg") or u.lower().endswith(".zip"))
-]
-if preferred:
-    print(preferred[0])
-    raise SystemExit(0)
-
-generic = [u for u in urls if u.lower().endswith(".dmg") or u.lower().endswith(".zip")]
+generic = [u for u in urls if u.lower().endswith(".zip") or u.lower().endswith(".dmg")]
 if generic:
     print(generic[0])
     raise SystemExit(0)
@@ -776,24 +771,20 @@ PY
         fi
     fi
 
-    release_html="$(curl -fsSL -H 'User-Agent: acidanthera-installer' 'https://github.com/microsoft/azuredatastudio/releases/tag/final' 2>/dev/null || true)"
+    release_html="$(curl -fsSL -H 'User-Agent: acidanthera-installer' "$release_page_url" 2>/dev/null || true)"
     if [[ -n "$release_html" ]]; then
         fallback_url="$(printf '%s\n' "$release_html" \
-            | grep -Eo 'https://github\.com/microsoft/azuredatastudio/releases/download/[^"\'"'"'[:space:]]+azuredatastudio-macos-[0-9.]+\.zip' \
+            | grep -Eo 'href="/microsoft/azuredatastudio/releases/download/final/azuredatastudio-macos-[0-9.]+\.zip"' \
             | grep -Ev 'arm64|universal' \
-            | head -n 1)"
+            | head -n 1 \
+            | sed -E 's/^href="([^"]+)"$/\1/')"
+        if [[ -n "$fallback_url" ]]; then
+            fallback_url="https://github.com${fallback_url}"
+        fi
         if [[ -n "$fallback_url" ]] && is_supported_package_url "$fallback_url"; then
             echo "$fallback_url"
             return 0
         fi
-    fi
-
-    fallback_url="$(resolve_reachable_package_url \
-        "https://aka.ms/azuredatastudio-mac" \
-        "https://go.microsoft.com/fwlink/?linkid=2213988")"
-    if [[ -n "$fallback_url" ]]; then
-        echo "$fallback_url"
-        return 0
     fi
 
     echo ""
