@@ -374,6 +374,136 @@ install_packet_tracer() {
 # Main Orchestration
 # ============================================================================
 
+get_android_studio_dmg_url() {
+    echo "https://edgedl.me.gvt1.com/android/studio/install/2025.3.3.7/android-studio-panda3-patch1-mac.dmg"
+}
+
+install_android_studio_direct_dmg() {
+    local dmg_url="$1"
+    local dmg_file="/tmp/android_studio.dmg"
+    local mount_point="/tmp/android_studio_mount"
+    local app_path=""
+    local target_app="/Applications/Android Studio.app"
+    local stage_file="$2"
+
+    print_info "Downloading Android Studio DMG from Google CDN..."
+    
+    rm -f "$dmg_file" >/dev/null 2>&1 || true
+    echo "Downloading Android Studio (CDN)" > "$stage_file" 2>/dev/null || true
+    monitor_download_progress "$dmg_file" "$stage_file" "Android Studio" &
+    local monitor_pid=$!
+    if ! download_file_resilient "$dmg_url" "$dmg_file"; then
+        kill $monitor_pid 2>/dev/null || true
+        wait $monitor_pid 2>/dev/null || true
+        print_warn "Android Studio CDN download failed."
+        return 1
+    fi
+    kill $monitor_pid 2>/dev/null || true
+    wait $monitor_pid 2>/dev/null || true
+
+    echo "Verifying download" > "$stage_file" 2>/dev/null || true
+    if ! hdiutil verify "$dmg_file" >/dev/null 2>&1; then
+        print_warn "Downloaded Android Studio DMG failed verification."
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    rm -rf "$mount_point" >/dev/null 2>&1 || true
+    mkdir -p "$mount_point" || return 1
+
+    echo "Mounting DMG" > "$stage_file" 2>/dev/null || true
+    if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
+        print_warn "Failed to mount Android Studio DMG."
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    echo "Locating app" > "$stage_file" 2>/dev/null || true
+    app_path="$(find "$mount_point" -maxdepth 4 -type d -name 'Android Studio.app' | head -n 1)"
+    if [[ -z "$app_path" ]]; then
+        app_path="$(find "$mount_point" -maxdepth 4 -type d -name '*.app' | head -n 1)"
+    fi
+
+    if [[ -z "$app_path" ]]; then
+        print_warn "Android Studio app not found in DMG."
+        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    echo "Installing" > "$stage_file" 2>/dev/null || true
+    sudo rm -rf "$target_app" >/dev/null 2>&1 || true
+    if ! sudo ditto "$app_path" "$target_app" >/dev/null 2>&1; then
+        print_warn "Failed to copy Android Studio to /Applications."
+        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    echo "Cleanup" > "$stage_file" 2>/dev/null || true
+    hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+    rm -f "$dmg_file" >/dev/null 2>&1 || true
+
+    if [[ -d "$target_app" ]]; then
+        print_ok "Android Studio installed from CDN."
+        return 0
+    fi
+
+    print_warn "Android Studio install completed but app not found."
+    return 1
+}
+
+install_android_studio_with_fallback() {
+    local app_path="/Applications/Android Studio.app"
+    local stage_file="$1"
+    local brew_pid=""
+    local brew_timeout=120
+    local start_time
+    local elapsed
+    local dmg_url
+
+    print_info "Attempting Android Studio installation via Homebrew..."
+
+    # Try Homebrew first with timeout
+    echo "Trying Homebrew (timeout: ${brew_timeout}s)" > "$stage_file" 2>/dev/null || true
+    start_time=$(date +%s)
+    
+    (
+        reinstall_cask_app "android-studio" "$app_path" "Android Studio" "$stage_file"
+    ) &
+    brew_pid=$!
+
+    # Wait for Homebrew with timeout
+    while kill -0 $brew_pid 2>/dev/null; do
+        elapsed=$(($(date +%s) - start_time))
+        if [[ $elapsed -gt $brew_timeout ]]; then
+            print_warn "Homebrew installation timed out after ${brew_timeout}s. Falling back to direct download."
+            kill -9 $brew_pid 2>/dev/null || true
+            break
+        fi
+        sleep 2
+    done
+
+    wait $brew_pid 2>/dev/null
+    local brew_result=$?
+
+    # If Homebrew succeeded, we're done
+    if [[ $brew_result -eq 0 ]] && [[ -d "$app_path" ]]; then
+        print_ok "Android Studio installed via Homebrew."
+        return 0
+    fi
+
+    # Fall back to direct DMG download
+    print_warn "Homebrew installation failed. Using direct download from Google CDN..."
+    dmg_url="$(get_android_studio_dmg_url)"
+    if install_android_studio_direct_dmg "$dmg_url" "$stage_file"; then
+        return 0
+    fi
+
+    print_warn "Android Studio installation failed (both Homebrew and CDN)."
+    return 1
+}
+
 install_required_software() {
     local had_error=0
     local stage_blender="/tmp/install_stage_blender.txt"
@@ -388,7 +518,7 @@ install_required_software() {
     reinstall_cask_app "blender" "/Applications/Blender.app" "Blender" "$stage_blender" >/dev/null 2>&1 &
     spinner_wait_with_stages $! "Installing Blender" "$stage_blender" || had_error=1
 
-    reinstall_cask_app "android-studio" "/Applications/Android Studio.app" "Android Studio" "$stage_android" >/dev/null 2>&1 &
+    install_android_studio_with_fallback "$stage_android" >/dev/null 2>&1 &
     spinner_wait_with_stages $! "Installing Android Studio" "$stage_android" || had_error=1
 
     install_azure_data_studio_direct "$stage_azure" >/dev/null 2>&1 &
