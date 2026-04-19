@@ -680,9 +680,11 @@ install_android_studio_direct() {
 
     print_warn "Android Studio installation completed but app was not found at $target_app"
     return 1
-}
 
 def collect_urls(release_obj):
+resolve_azure_data_studio_url() {
+}
+
 resolve_azure_data_studio_url() {
     local explicit_url="${AZURE_DATA_STUDIO_URL:-}"
     local direct_url="https://github.com/microsoft/azuredatastudio/releases/download/final/azuredatastudio-macos-1.52.0.zip"
