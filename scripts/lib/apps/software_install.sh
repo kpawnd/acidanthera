@@ -81,6 +81,190 @@ versions_match_latest() {
     [[ "$norm_installed" == "$norm_supported" ]]
 }
 
+versions_match_compatible() {
+    local installed_ver="$1"
+    local supported_ver="$2"
+    local norm_installed
+    local norm_supported
+
+    if versions_match_latest "$installed_ver" "$supported_ver"; then
+        return 0
+    fi
+
+    if [[ -z "$installed_ver" || -z "$supported_ver" || "$supported_ver" == "unknown" ]]; then
+        return 1
+    fi
+
+    norm_installed="$(normalize_version_for_compare "$installed_ver")"
+    norm_supported="$(normalize_version_for_compare "$supported_ver")"
+
+    if [[ "$norm_supported" == "$norm_installed".* || "$norm_installed" == "$norm_supported".* ]]; then
+        return 0
+    fi
+
+    return 1
+}
+
+extract_version_from_url() {
+    local url="$1"
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<PY
+import re
+
+url = '''$url'''
+patterns = [
+    r'([0-9]+(?:\.[0-9]+)+)',
+    r'[_-]([0-9]{3,})[_-]',
+]
+for pat in patterns:
+    m = re.search(pat, url)
+    if m:
+        print(m.group(1))
+        break
+else:
+    print('unknown')
+PY
+        return 0
+    fi
+
+    echo "unknown"
+    return 0
+}
+
+normalize_packet_tracer_version() {
+    local raw="$1"
+
+    if [[ -z "$raw" || "$raw" == "unknown" ]]; then
+        echo "unknown"
+        return 0
+    fi
+
+    if [[ "$raw" =~ ^[0-9]{3}$ ]]; then
+        echo "${raw:0:1}.${raw:1:1}.${raw:2:1}"
+        return 0
+    fi
+
+    if [[ "$raw" =~ ^[0-9]{4}$ ]]; then
+        echo "${raw:0:1}.${raw:1:1}.${raw:2:2}"
+        return 0
+    fi
+
+    echo "$raw"
+    return 0
+}
+
+should_skip_direct_install() {
+    local app_path="$1"
+    local display_name="$2"
+    local supported_ver="$3"
+    local installed_ver=""
+
+    if [[ ! -d "$app_path" ]]; then
+        return 1
+    fi
+
+    installed_ver="$(get_app_version "$app_path")"
+
+    if [[ -z "$supported_ver" || "$supported_ver" == "unknown" ]]; then
+        print_info "$display_name installed. Version: $installed_ver"
+        print_ok "$display_name already installed. Skipping reinstall."
+        return 0
+    fi
+
+    print_info "$display_name supported version for this macOS: $supported_ver"
+
+    if versions_match_compatible "$installed_ver" "$supported_ver"; then
+        print_ok "$display_name already at latest supported version ($installed_ver). Skipping reinstall."
+        return 0
+    fi
+
+    print_info "$display_name installed version ($installed_ver) differs from supported ($supported_ver). Reinstalling."
+    return 1
+}
+
+get_android_studio_supported_version() {
+    local supported_ver="unknown"
+    local dmg_url=""
+
+    if brew_is_healthy; then
+        supported_ver="$(get_brew_cask_version "android-studio")"
+        if [[ -n "$supported_ver" && "$supported_ver" != "unknown" ]]; then
+            echo "$supported_ver"
+            return 0
+        fi
+    fi
+
+    dmg_url="$(resolve_android_studio_dmg_url)"
+    supported_ver="$(extract_version_from_url "$dmg_url")"
+    echo "$supported_ver"
+    return 0
+}
+
+get_azure_data_studio_supported_version() {
+    local supported_ver="unknown"
+    local download_url=""
+
+    if brew_is_healthy; then
+        supported_ver="$(get_brew_cask_version "azure-data-studio")"
+        if [[ -n "$supported_ver" && "$supported_ver" != "unknown" ]]; then
+            echo "$supported_ver"
+            return 0
+        fi
+    fi
+
+    download_url="$(resolve_azure_data_studio_url)"
+    supported_ver="$(extract_version_from_url "$download_url")"
+    echo "$supported_ver"
+    return 0
+}
+
+get_packet_tracer_supported_version() {
+    local dmg_url=""
+    local version="unknown"
+
+    dmg_url="$(resolve_packet_tracer_dmg_url)"
+    version="$(extract_version_from_url "$dmg_url")"
+    version="$(normalize_packet_tracer_version "$version")"
+    echo "$version"
+    return 0
+}
+
+resolve_reachable_url() {
+    local candidate=""
+    local final_url=""
+
+    for candidate in "$@"; do
+        [[ -z "$candidate" ]] && continue
+        final_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' -L "$candidate" 2>/dev/null || true)"
+        if [[ -n "$final_url" ]]; then
+            echo "$final_url"
+            return 0
+        fi
+    done
+
+    echo ""
+    return 1
+}
+
+find_installed_packet_tracer_app() {
+    local candidate=""
+    local name_lc=""
+
+    while IFS= read -r candidate; do
+        [[ -z "$candidate" ]] && continue
+        name_lc="$(basename "$candidate" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$name_lc" == *installer* || "$name_lc" == *setup* ]]; then
+            continue
+        fi
+        echo "$candidate"
+        return 0
+    done < <(find /Applications -maxdepth 1 -type d -name '*Packet*Tracer*.app' 2>/dev/null)
+
+    echo ""
+    return 1
+}
+
 resolve_brew_download_locks_for_token() {
     local token="$1"
     local lock_dir="${HOME}/Library/Caches/Homebrew/downloads"
@@ -226,7 +410,7 @@ verify_required_software_present() {
         had_error=1
     fi
 
-    packet_tracer_app="$(find /Applications -maxdepth 1 -type d -name '*Packet*Tracer*.app' | head -n 1)"
+    packet_tracer_app="$(find_installed_packet_tracer_app)"
     if [[ -n "$packet_tracer_app" ]]; then
         print_ok "Verified Cisco Packet Tracer installation: $packet_tracer_app"
     else
@@ -323,8 +507,14 @@ install_android_studio_direct() {
     local mount_point="/tmp/android_studio_mount"
     local app_path=""
     local target_app="/Applications/Android Studio.app"
+    local supported_ver="unknown"
 
     print_info "Installing Android Studio..."
+
+    supported_ver="$(get_android_studio_supported_version)"
+    if should_skip_direct_install "$target_app" "Android Studio" "$supported_ver"; then
+        return 0
+    fi
 
     dmg_url="$(resolve_android_studio_dmg_url)"
     if [[ -z "$dmg_url" ]]; then
@@ -386,10 +576,12 @@ install_android_studio_direct() {
 
 resolve_azure_data_studio_url() {
     local explicit_url="${AZURE_DATA_STUDIO_URL:-}"
+    local final_api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases/tags/final"
     local api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases/latest"
     local releases_api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases?per_page=10"
     local cask_source=""
     local cask_url=""
+    local fallback_url=""
     local json=""
 
     if [[ -n "$explicit_url" ]]; then
@@ -412,7 +604,13 @@ resolve_azure_data_studio_url() {
     json="$(curl -fsSL \
         -H 'Accept: application/vnd.github+json' \
         -H 'User-Agent: acidanthera-installer' \
+        "$final_api_url" 2>/dev/null || true)"
+    if [[ -z "$json" ]]; then
+        json="$(curl -fsSL \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'User-Agent: acidanthera-installer' \
         "$api_url" 2>/dev/null || true)"
+    fi
     if [[ -z "$json" ]]; then
         json="$(curl -fsSL \
             -H 'Accept: application/vnd.github+json' \
@@ -425,7 +623,7 @@ resolve_azure_data_studio_url() {
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        python3 - <<PY
+        fallback_url="$(python3 - <<PY
 import json
 
 raw = '''$json'''
@@ -450,7 +648,40 @@ elif isinstance(data, list):
 
 urls = [u for u in urls if u]
 
-# Prefer direct DMG/ZIP assets that include mac markers.
+# Prefer Intel macOS packages first: azuredatastudio-macos-<version>.zip (no arm64/universal suffix).
+intel_zip = [
+    u for u in urls
+    if u.lower().endswith(".zip")
+    and "azuredatastudio-macos-" in u.lower()
+    and "arm64" not in u.lower()
+    and "universal" not in u.lower()
+]
+if intel_zip:
+    print(intel_zip[0])
+    raise SystemExit(0)
+
+intel_dmg = [
+    u for u in urls
+    if u.lower().endswith(".dmg")
+    and "mac" in u.lower()
+    and "arm64" not in u.lower()
+    and "universal" not in u.lower()
+]
+if intel_dmg:
+    print(intel_dmg[0])
+    raise SystemExit(0)
+
+mac_zip = [
+    u for u in urls
+    if u.lower().endswith(".zip")
+    and "mac" in u.lower()
+    and "arm64" not in u.lower()
+    and "universal" not in u.lower()
+]
+if mac_zip:
+    print(mac_zip[0])
+    raise SystemExit(0)
+
 preferred = [
     u for u in urls
     if "mac" in u.lower() and (u.lower().endswith(".dmg") or u.lower().endswith(".zip"))
@@ -466,6 +697,18 @@ if generic:
 
 print("")
 PY
+        )"
+        if [[ -n "$fallback_url" ]]; then
+            echo "$fallback_url"
+            return 0
+        fi
+    fi
+
+    fallback_url="$(resolve_reachable_url \
+        "https://aka.ms/azuredatastudio-mac" \
+        "https://go.microsoft.com/fwlink/?linkid=2213988")"
+    if [[ -n "$fallback_url" ]]; then
+        echo "$fallback_url"
         return 0
     fi
 
@@ -481,8 +724,14 @@ install_azure_data_studio_direct() {
     local dmg_file="/tmp/azure_data_studio.dmg"
     local zip_file="/tmp/azure_data_studio.zip"
     local app_path=""
+    local supported_ver="unknown"
 
     print_info "Installing Azure Data Studio..."
+
+    supported_ver="$(get_azure_data_studio_supported_version)"
+    if should_skip_direct_install "$target_app" "Azure Data Studio" "$supported_ver"; then
+        return 0
+    fi
 
     download_url="$(resolve_azure_data_studio_url)"
     if [[ -z "$download_url" ]]; then
@@ -644,9 +893,24 @@ install_packet_tracer() {
     local pkg_path
     local mpkg_path
     local app_path
+    local app_name_lc=""
+    local nested_pkg_path=""
+    local nested_mpkg_path=""
+    local nested_app_path=""
     local installed_app
+    local supported_ver="unknown"
 
     print_info "Installing Cisco Packet Tracer..."
+
+    supported_ver="$(get_packet_tracer_supported_version)"
+    installed_app="$(find_installed_packet_tracer_app)"
+    if [[ -n "$installed_app" ]]; then
+        if should_skip_direct_install "$installed_app" "Cisco Packet Tracer" "$supported_ver"; then
+            return 0
+        fi
+    else
+        print_info "Cisco Packet Tracer not currently installed. Proceeding with installation."
+    fi
 
     dmg_url="$(resolve_packet_tracer_dmg_url)"
 
@@ -696,6 +960,26 @@ install_packet_tracer() {
         app_path="$(find "$mount_point" -maxdepth 5 -name '*.app' | head -n 1)"
     fi
 
+    if [[ -n "$app_path" ]]; then
+        app_name_lc="$(basename "$app_path" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$app_name_lc" == *installer* || "$app_name_lc" == *setup* ]]; then
+            nested_pkg_path="$(find "$app_path" -maxdepth 8 -name '*.pkg' | head -n 1)"
+            nested_mpkg_path="$(find "$app_path" -maxdepth 8 -name '*.mpkg' | head -n 1)"
+            nested_app_path="$(find "$app_path" -maxdepth 8 -type d -name '*Packet*Tracer*.app' ! -path "$app_path" | head -n 1)"
+
+            if [[ -z "$pkg_path" && -n "$nested_pkg_path" ]]; then
+                pkg_path="$nested_pkg_path"
+            fi
+            if [[ -z "$mpkg_path" && -n "$nested_mpkg_path" ]]; then
+                mpkg_path="$nested_mpkg_path"
+            fi
+            if [[ -n "$nested_app_path" ]]; then
+                app_path="$nested_app_path"
+                app_name_lc="$(basename "$app_path" | tr '[:upper:]' '[:lower:]')"
+            fi
+        fi
+    fi
+
     sudo -v
 
     if [[ -n "$pkg_path" ]]; then
@@ -723,6 +1007,12 @@ install_packet_tracer() {
             return 1
         fi
     elif [[ -n "$app_path" ]]; then
+        if [[ "$app_name_lc" == *installer* || "$app_name_lc" == *setup* ]]; then
+            print_warn "Found Packet Tracer installer bundle but not the actual app payload."
+            hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+            rm -f "$dmg_file" >/dev/null 2>&1 || true
+            return 1
+        fi
         print_info "Copying Packet Tracer app bundle to /Applications"
         sudo rm -rf "/Applications/$(basename "$app_path")" >/dev/null 2>&1 || true
         if ! sudo ditto "$app_path" "/Applications/$(basename "$app_path")" >/dev/null 2>&1; then
@@ -738,7 +1028,7 @@ install_packet_tracer() {
         return 1
     fi
 
-    installed_app="$(find /Applications -maxdepth 1 -type d -name '*Packet*Tracer*.app' | head -n 1)"
+    installed_app="$(find_installed_packet_tracer_app)"
     if [[ -z "$installed_app" ]]; then
         print_warn "Packet Tracer install command completed but app was not found in /Applications."
         if [[ -f "$install_log" ]]; then
