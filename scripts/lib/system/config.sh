@@ -122,6 +122,7 @@ configure_performance_tweaks() {
 configure_apple_account_restrictions() {
     local profile_id="com.lab.restrictions.apple-account"
     local profile_file="/tmp/${profile_id}.mobileconfig"
+    local profiles_err="/tmp/${profile_id}.err"
     local profile_uuid_payload="9E8D88F7-1E6A-4C80-BBCD-4B5C62784A10"
     local profile_uuid_root="1A2F4E5C-11A7-47E1-8A27-13C2A4CF7E50"
 
@@ -166,16 +167,6 @@ configure_apple_account_restrictions() {
             <false/>
             <key>allowCloudBookmarks</key>
             <false/>
-            <key>allowiCloudPrivateRelay</key>
-            <false/>
-            <key>allowHandoff</key>
-            <false/>
-            <key>allowPasswordAutoFill</key>
-            <false/>
-            <key>allowPasswordSharing</key>
-            <false/>
-            <key>allowDiagnosticSubmission</key>
-            <false/>
         </dict>
     </array>
     <key>PayloadDisplayName</key>
@@ -198,16 +189,25 @@ configure_apple_account_restrictions() {
 </plist>
 EOF
 
+    if ! plutil -lint "$profile_file" >/dev/null 2>&1; then
+        print_warn "Generated restrictions profile is invalid XML/plist."
+        rm -f "$profile_file" "$profiles_err" >/dev/null 2>&1 || true
+        return 1
+    fi
+
     sudo profiles remove -identifier "$profile_id" >/dev/null 2>&1 || true
-    if ! sudo profiles install -type configuration -path "$profile_file" >/dev/null 2>&1; then
-        if ! sudo profiles -I -F "$profile_file" >/dev/null 2>&1; then
+    if ! sudo profiles -I -F "$profile_file" > /dev/null 2>"$profiles_err"; then
+        if ! sudo profiles install -type configuration -path "$profile_file" > /dev/null 2>>"$profiles_err"; then
             print_warn "Failed to install Apple account restrictions profile."
-            rm -f "$profile_file" >/dev/null 2>&1 || true
+            if [[ -s "$profiles_err" ]]; then
+                print_warn "profiles output: $(tail -n 1 "$profiles_err")"
+            fi
+            rm -f "$profile_file" "$profiles_err" >/dev/null 2>&1 || true
             return 1
         fi
     fi
 
-    rm -f "$profile_file" >/dev/null 2>&1 || true
+    rm -f "$profile_file" "$profiles_err" >/dev/null 2>&1 || true
     print_ok "Apple account/iCloud restrictions profile installed."
     return 0
 }

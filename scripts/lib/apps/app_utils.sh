@@ -310,6 +310,7 @@ run_packet_tracer_installer_unattended() {
     local install_log="$2"
     local mount_point="$3"
     local app_name=""
+    local installer_exec=""
     local version=""
     local install_dir=""
 
@@ -322,13 +323,38 @@ run_packet_tracer_installer_unattended() {
     install_dir="/Applications/Cisco Packet Tracer $version"
     mkdir -p "$install_dir" || true
 
-    # Use full path to installer executable as shown in user's working example
-    # Format: sudo "/path/to/app.app/Contents/MacOS/executable" install --root ... --accept-licenses --accept-messages --confirm-command
-    if sudo "$app_path/Contents/MacOS/$app_name" install \
+    if [[ -x "$app_path/Contents/MacOS/$app_name" ]]; then
+        installer_exec="$app_path/Contents/MacOS/$app_name"
+    else
+        installer_exec="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -perm -111 2>/dev/null | head -n 1)"
+    fi
+
+    if [[ -z "$installer_exec" ]]; then
+        echo "No executable installer binary found in $app_path/Contents/MacOS" >"$install_log"
+        return 1
+    fi
+
+    if sudo -n "$installer_exec" install \
         --root "$install_dir" \
         --accept-licenses \
         --accept-messages \
         --confirm-command >"$install_log" 2>&1; then
+        return 0
+    fi
+
+    if sudo "$installer_exec" install \
+        --root "$install_dir" \
+        --accept-licenses \
+        --accept-messages \
+        --confirm-command >>"$install_log" 2>&1; then
+        return 0
+    fi
+
+    if sudo -n "$installer_exec" install --root "$install_dir" >>"$install_log" 2>&1; then
+        return 0
+    fi
+
+    if sudo "$installer_exec" install --root "$install_dir" >>"$install_log" 2>&1; then
         return 0
     fi
 
