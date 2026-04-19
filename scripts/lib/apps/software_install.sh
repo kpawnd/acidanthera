@@ -273,6 +273,278 @@ download_file_optimized() {
         --output "$out_file"
 }
 
+download_file_resilient() {
+    local url="$1"
+    local out_file="$2"
+    local attempt=1
+    local max_attempts=6
+
+    while [[ "$attempt" -le "$max_attempts" ]]; do
+        print_info "Downloading $(basename "$out_file") (attempt $attempt/$max_attempts)"
+        if download_file_optimized "$url" "$out_file"; then
+            return 0
+        fi
+
+        if [[ "$attempt" -lt "$max_attempts" ]]; then
+            print_warn "Download attempt failed for $(basename "$out_file"). Retrying..."
+            sleep $((attempt * 2))
+        fi
+
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
+resolve_android_studio_dmg_url() {
+    local explicit_url="${ANDROID_STUDIO_DMG_URL:-}"
+    local cask_source=""
+
+    if [[ -n "$explicit_url" ]]; then
+        echo "$explicit_url"
+        return 0
+    fi
+
+    if brew_is_healthy; then
+        cask_source="$(brew_cmd cat --cask android-studio 2>/dev/null || true)"
+        if [[ -n "$cask_source" ]]; then
+            printf '%s\n' "$cask_source" | awk -F'"' '/^[[:space:]]*url ".*\.dmg"/ {print $2; exit}'
+            return 0
+        fi
+    fi
+
+    echo "https://edgedl.me.gvt1.com/android/studio/install/2025.3.3.7/android-studio-panda3-patch1-mac.dmg"
+    return 0
+}
+
+install_android_studio_direct() {
+    local dmg_url=""
+    local dmg_file="/tmp/android_studio.dmg"
+    local mount_point="/tmp/android_studio_mount"
+    local app_path=""
+    local target_app="/Applications/Android Studio.app"
+
+    print_info "Installing Android Studio..."
+
+    dmg_url="$(resolve_android_studio_dmg_url)"
+    if [[ -z "$dmg_url" ]]; then
+        print_warn "Could not resolve Android Studio DMG URL."
+        return 1
+    fi
+
+    rm -f "$dmg_file" >/dev/null 2>&1 || true
+    if ! download_file_resilient "$dmg_url" "$dmg_file"; then
+        print_warn "Android Studio download failed after retries."
+        return 1
+    fi
+
+    if ! hdiutil verify "$dmg_file" >/dev/null 2>&1; then
+        print_warn "Downloaded Android Studio DMG failed integrity verification."
+        return 1
+    fi
+
+    rm -rf "$mount_point" >/dev/null 2>&1 || true
+    mkdir -p "$mount_point" || return 1
+
+    if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
+        print_warn "Failed to mount Android Studio DMG."
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    app_path="$(find "$mount_point" -maxdepth 4 -type d -name 'Android Studio.app' | head -n 1)"
+    if [[ -z "$app_path" ]]; then
+        app_path="$(find "$mount_point" -maxdepth 4 -type d -name '*.app' | head -n 1)"
+    fi
+
+    if [[ -z "$app_path" ]]; then
+        print_warn "Android Studio app bundle was not found in mounted DMG."
+        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    sudo rm -rf "$target_app" >/dev/null 2>&1 || true
+    if ! sudo ditto "$app_path" "$target_app" >/dev/null 2>&1; then
+        print_warn "Failed to copy Android Studio to /Applications."
+        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+    rm -f "$dmg_file" >/dev/null 2>&1 || true
+
+    if [[ -d "$target_app" ]]; then
+        print_ok "Android Studio installed. Version: $(get_app_version "$target_app")"
+        return 0
+    fi
+
+    print_warn "Android Studio installation completed but app was not found at $target_app"
+    return 1
+}
+
+resolve_azure_data_studio_url() {
+    local explicit_url="${AZURE_DATA_STUDIO_URL:-}"
+    local api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases/latest"
+    local json=""
+
+    if [[ -n "$explicit_url" ]]; then
+        echo "$explicit_url"
+        return 0
+    fi
+
+    json="$(curl -fsSL "$api_url" 2>/dev/null || true)"
+    if [[ -z "$json" ]]; then
+        echo ""
+        return 1
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<PY
+import json
+
+raw = '''$json'''
+try:
+    data = json.loads(raw)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+assets = data.get("assets", [])
+urls = [a.get("browser_download_url", "") for a in assets]
+
+preferred = [u for u in urls if "mac" in u.lower() and u.lower().endswith(".dmg")]
+if preferred:
+    print(preferred[0])
+    raise SystemExit(0)
+
+zip_assets = [u for u in urls if "mac" in u.lower() and u.lower().endswith(".zip")]
+if zip_assets:
+    print(zip_assets[0])
+else:
+    print("")
+PY
+        return 0
+    fi
+
+    echo ""
+    return 1
+}
+
+install_azure_data_studio_direct() {
+    local download_url=""
+    local target_app="/Applications/Azure Data Studio.app"
+    local mount_point="/tmp/azure_data_studio_mount"
+    local work_dir="/tmp/azure_data_studio_extract"
+    local dmg_file="/tmp/azure_data_studio.dmg"
+    local zip_file="/tmp/azure_data_studio.zip"
+    local app_path=""
+
+    print_info "Installing Azure Data Studio..."
+
+    download_url="$(resolve_azure_data_studio_url)"
+    if [[ -z "$download_url" ]]; then
+        print_warn "Could not resolve Azure Data Studio download URL."
+        return 1
+    fi
+
+    sudo rm -rf "$target_app" >/dev/null 2>&1 || true
+
+    if [[ "$download_url" == *.dmg ]]; then
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+        if ! download_file_resilient "$download_url" "$dmg_file"; then
+            print_warn "Azure Data Studio DMG download failed after retries."
+            return 1
+        fi
+
+        if ! hdiutil verify "$dmg_file" >/dev/null 2>&1; then
+            print_warn "Downloaded Azure Data Studio DMG failed integrity verification."
+            return 1
+        fi
+
+        rm -rf "$mount_point" >/dev/null 2>&1 || true
+        mkdir -p "$mount_point" || return 1
+
+        if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
+            print_warn "Failed to mount Azure Data Studio DMG."
+            rm -f "$dmg_file" >/dev/null 2>&1 || true
+            return 1
+        fi
+
+        app_path="$(find "$mount_point" -maxdepth 4 -type d -name 'Azure Data Studio.app' | head -n 1)"
+        if [[ -z "$app_path" ]]; then
+            app_path="$(find "$mount_point" -maxdepth 4 -type d -name '*.app' | head -n 1)"
+        fi
+
+        if [[ -z "$app_path" ]]; then
+            print_warn "Azure Data Studio app bundle was not found in mounted DMG."
+            hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+            rm -f "$dmg_file" >/dev/null 2>&1 || true
+            return 1
+        fi
+
+        if ! sudo ditto "$app_path" "$target_app" >/dev/null 2>&1; then
+            print_warn "Failed to copy Azure Data Studio to /Applications."
+            hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+            rm -f "$dmg_file" >/dev/null 2>&1 || true
+            return 1
+        fi
+
+        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+        rm -f "$dmg_file" >/dev/null 2>&1 || true
+    elif [[ "$download_url" == *.zip ]]; then
+        rm -f "$zip_file" >/dev/null 2>&1 || true
+        rm -rf "$work_dir" >/dev/null 2>&1 || true
+        mkdir -p "$work_dir" || return 1
+
+        if ! download_file_resilient "$download_url" "$zip_file"; then
+            print_warn "Azure Data Studio zip download failed after retries."
+            return 1
+        fi
+
+        if ! unzip -q "$zip_file" -d "$work_dir"; then
+            print_warn "Failed to extract Azure Data Studio zip archive."
+            rm -f "$zip_file" >/dev/null 2>&1 || true
+            rm -rf "$work_dir" >/dev/null 2>&1 || true
+            return 1
+        fi
+
+        app_path="$(find "$work_dir" -maxdepth 6 -type d -name 'Azure Data Studio.app' | head -n 1)"
+        if [[ -z "$app_path" ]]; then
+            app_path="$(find "$work_dir" -maxdepth 6 -type d -name '*.app' | head -n 1)"
+        fi
+
+        if [[ -z "$app_path" ]]; then
+            print_warn "Azure Data Studio app bundle was not found in extracted archive."
+            rm -f "$zip_file" >/dev/null 2>&1 || true
+            rm -rf "$work_dir" >/dev/null 2>&1 || true
+            return 1
+        fi
+
+        if ! sudo ditto "$app_path" "$target_app" >/dev/null 2>&1; then
+            print_warn "Failed to copy Azure Data Studio to /Applications."
+            rm -f "$zip_file" >/dev/null 2>&1 || true
+            rm -rf "$work_dir" >/dev/null 2>&1 || true
+            return 1
+        fi
+
+        rm -f "$zip_file" >/dev/null 2>&1 || true
+        rm -rf "$work_dir" >/dev/null 2>&1 || true
+    else
+        print_warn "Unsupported Azure Data Studio package type: $download_url"
+        return 1
+    fi
+
+    if [[ -d "$target_app" ]]; then
+        print_ok "Azure Data Studio installed. Version: $(get_app_version "$target_app")"
+        return 0
+    fi
+
+    print_warn "Azure Data Studio installation completed but app was not found at $target_app"
+    return 1
+}
+
 resolve_packet_tracer_dmg_url() {
     local explicit_url="${PACKET_TRACER_DMG_URL:-}"
     local release_repo="${PACKET_TRACER_RELEASE_REPO:-kpawnd/acidanthera}"
@@ -351,8 +623,8 @@ install_packet_tracer() {
         return 1
     fi
 
-    sudo rm -rf "$mount_point" >/dev/null 2>&1 || true
-    sudo mkdir -p "$mount_point" >/dev/null 2>&1 || true
+    rm -rf "$mount_point" >/dev/null 2>&1 || true
+    mkdir -p "$mount_point" || return 1
 
     print_info "Mounting DMG..."
     if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
@@ -443,11 +715,11 @@ install_required_software() {
 
     current_task=$((current_task + 1))
     announce_install_stage "$current_task" "$total_tasks" "Installing Android Studio"
-    reinstall_cask_app "android-studio" "/Applications/Android Studio.app" "Android Studio" || had_error=1
+    install_android_studio_direct || had_error=1
 
     current_task=$((current_task + 1))
     announce_install_stage "$current_task" "$total_tasks" "Installing Azure Data Studio"
-    reinstall_cask_app "azure-data-studio" "/Applications/Azure Data Studio.app" "Azure Data Studio" || had_error=1
+    install_azure_data_studio_direct || had_error=1
 
     current_task=$((current_task + 1))
     announce_install_stage "$current_task" "$total_tasks" "Installing Cisco Packet Tracer"
