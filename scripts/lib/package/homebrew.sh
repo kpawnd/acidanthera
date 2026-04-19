@@ -138,11 +138,14 @@ repair_homebrew_shallow_clones() {
 repair_homebrew_permissions() {
     local had_error=0
     local owner_user="${SUDO_USER:-$USER}"
+    local owner_group
     local zsh_dirs=(
         "/usr/local/share/zsh"
         "/usr/local/share/zsh/site-functions"
     )
     local d
+
+    owner_group="$(id -gn "$owner_user" 2>/dev/null || echo staff)"
 
     for d in "${zsh_dirs[@]}"; do
         if [[ ! -d "$d" ]]; then
@@ -155,11 +158,11 @@ repair_homebrew_permissions() {
 
         if [[ ! -w "$d" ]]; then
             print_info "Fixing write permissions for: $d"
-            chown -R "$owner_user":admin "$d" >/dev/null 2>&1 || {
+            sudo chown -R "$owner_user":"$owner_group" "$d" >/dev/null 2>&1 || {
                 print_warn "Could not change ownership for: $d"
                 had_error=1
             }
-            chmod u+w "$d" >/dev/null 2>&1 || {
+            sudo chmod u+w "$d" >/dev/null 2>&1 || {
                 print_warn "Could not set write permission for: $d"
                 had_error=1
             }
