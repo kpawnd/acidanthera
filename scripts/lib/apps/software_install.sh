@@ -304,39 +304,36 @@ is_packet_tracer_installer_bundle() {
     return 1
 }
 
+extract_pkg_from_installer_bundle() {
+    local app_path="$1"
+    local pkg_file=""
+
+    pkg_file="$(find "$app_path" -name '*.pkg' 2>/dev/null | head -n 1)"
+    if [[ -n "$pkg_file" ]]; then
+        echo "$pkg_file"
+        return 0
+    fi
+    return 1
+}
+
 run_packet_tracer_installer_bundle() {
     local app_path="$1"
     local install_log="$2"
+    local extracted_pkg=""
     local installer_bin=""
+
+    extracted_pkg="$(extract_pkg_from_installer_bundle "$app_path")"
+    if [[ -n "$extracted_pkg" ]]; then
+        if sudo installer -verboseR -pkg "$extracted_pkg" -target / >>"$install_log" 2>&1; then
+            return 0
+        fi
+    fi
 
     if [[ -x "$app_path/Contents/MacOS/installbuilder.sh" ]]; then
         installer_bin="$app_path/Contents/MacOS/installbuilder.sh"
-    elif [[ -f "$app_path/Contents/Resources/installbuilder.sh" ]]; then
-        installer_bin="$app_path/Contents/Resources/installbuilder.sh"
-    else
-        installer_bin="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -name '*install*' -perm -111 2>/dev/null | head -n 1)"
-    fi
-
-    if [[ -z "$installer_bin" ]]; then
-        return 1
-    fi
-
-    if [[ "$installer_bin" == *.sh ]]; then
-        if sudo bash "$installer_bin" --mode unattended --unattendedmodeui none --prefix /Applications >>"$install_log" 2>&1; then
+        if bash "$installer_bin" --mode unattended --unattendedmodeui none >"$install_log" 2>&1; then
             return 0
         fi
-        if sudo bash "$installer_bin" --mode unattended --prefix /Applications >>"$install_log" 2>&1; then
-            return 0
-        fi
-        return 1
-    fi
-
-    if sudo "$installer_bin" --mode unattended --unattendedmodeui none --prefix /Applications >>"$install_log" 2>&1; then
-        return 0
-    fi
-
-    if sudo "$installer_bin" --mode unattended --prefix /Applications >>"$install_log" 2>&1; then
-        return 0
     fi
 
     return 1
@@ -669,11 +666,9 @@ install_android_studio_direct() {
 
 resolve_azure_data_studio_url() {
     local explicit_url="${AZURE_DATA_STUDIO_URL:-}"
-    local final_api_url="https://api.github.com/repos/microsoft/azuredatastudio/releases/tags/final"
-    local release_page_url="https://github.com/microsoft/azuredatastudio/releases/tag/final"
     local json=""
-    local release_html=""
-    local fallback_url=""
+    local latest_release=""
+    local intel_zip_url=""
 
     if [[ -n "$explicit_url" ]]; then
         echo "$explicit_url"
@@ -683,91 +678,29 @@ resolve_azure_data_studio_url() {
     json="$(curl -fsSL \
         -H 'Accept: application/vnd.github+json' \
         -H 'User-Agent: acidanthera-installer' \
-        "$final_api_url" 2>/dev/null || true)"
+        'https://api.github.com/repos/microsoft/azuredatastudio/releases/tags/final' 2>/dev/null || true)"
 
     if [[ -n "$json" ]] && command -v python3 >/dev/null 2>&1; then
-        fallback_url="$(python3 - <<PY
+        intel_zip_url="$(python3 - <<PY
 import json
 
 raw = '''$json'''
 try:
     data = json.loads(raw)
+    assets = data.get('assets', [])
+    for asset in assets:
+        name = asset.get('name', '').lower()
+        url = asset.get('browser_download_url', '')
+        if url and name.startswith('azuredatastudio-macos-') and name.endswith('.zip') and 'arm64' not in name and 'universal' not in name:
+            print(url)
+            raise SystemExit(0)
 except Exception:
-    print("")
-    raise SystemExit(0)
-
-def collect_urls(release_obj):
-    assets = release_obj.get("assets", [])
-    return [a.get("browser_download_url", "") for a in assets]
-
-urls = []
-if isinstance(data, dict):
-    urls.extend(collect_urls(data))
-elif isinstance(data, list):
-    for rel in data:
-        if not isinstance(rel, dict):
-            continue
-        urls.extend(collect_urls(rel))
-
-urls = [u for u in urls if u]
-
-asset_names = []
-if isinstance(data, dict):
-    for a in data.get("assets", []):
-        name = a.get("name", "")
-        url = a.get("browser_download_url", "")
-        if name and url:
-            asset_names.append((name, url))
-
-# Prefer Intel macOS packages first: azuredatastudio-macos-<version>.zip (no arm64/universal suffix).
-intel_zip = [
-    url for name, url in asset_names
-    if name.lower().startswith("azuredatastudio-macos-")
-    and name.lower().endswith(".zip")
-    and "arm64" not in name.lower()
-    and "universal" not in name.lower()
-]
-if intel_zip:
-    print(intel_zip[0])
-    raise SystemExit(0)
-
-intel_dmg = [
-    url for name, url in asset_names
-    if name.lower().startswith("azuredatastudio-macos-")
-    and name.lower().endswith(".dmg")
-    and "arm64" not in name.lower()
-    and "universal" not in name.lower()
-]
-if intel_dmg:
-    print(intel_dmg[0])
-    raise SystemExit(0)
-
-generic = [u for u in urls if u.lower().endswith(".zip") or u.lower().endswith(".dmg")]
-if generic:
-    print(generic[0])
-    raise SystemExit(0)
-
-print("")
+    pass
+print('')
 PY
         )"
-        if [[ -n "$fallback_url" ]] && is_supported_package_url "$fallback_url"; then
-            echo "$fallback_url"
-            return 0
-        fi
-    fi
-
-    release_html="$(curl -fsSL -H 'User-Agent: acidanthera-installer' "$release_page_url" 2>/dev/null || true)"
-    if [[ -n "$release_html" ]]; then
-        fallback_url="$(printf '%s\n' "$release_html" \
-            | grep -Eo 'href="/microsoft/azuredatastudio/releases/download/final/azuredatastudio-macos-[0-9.]+\.zip"' \
-            | grep -Ev 'arm64|universal' \
-            | head -n 1 \
-            | sed -E 's/^href="([^"]+)"$/\1/')"
-        if [[ -n "$fallback_url" ]]; then
-            fallback_url="https://github.com${fallback_url}"
-        fi
-        if [[ -n "$fallback_url" ]] && is_supported_package_url "$fallback_url"; then
-            echo "$fallback_url"
+        if [[ -n "$intel_zip_url" ]]; then
+            echo "$intel_zip_url"
             return 0
         fi
     fi
