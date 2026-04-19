@@ -38,6 +38,7 @@ main() {
     run_step "Acquire sudo session" ensure_sudo_session
     run_step "Install or fix git in PATH" ensure_git_installed
     run_step "Install Homebrew" install_homebrew
+    run_step "Install Golang" ensure_go_installed
     run_step "Ensure runtime dependencies" ensure_runtime_dependencies
     run_step "Report app versions" report_installed_app_versions
     run_step_interactive "Configure firmware password" configure_firmware_password

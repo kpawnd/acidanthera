@@ -223,6 +223,29 @@ ensure_runtime_dependencies() {
     [[ "$had_error" -eq 0 ]]
 }
 
+ensure_go_installed() {
+    if command -v go >/dev/null 2>&1; then
+        print_ok "go is already available: $(command -v go)"
+        return 0
+    fi
+
+    if ! brew_is_healthy; then
+        print_warn "go is missing and Homebrew is unavailable right now."
+        return 1
+    fi
+
+    print_info "Installing Golang (go) via Homebrew..."
+    if HOMEBREW_NO_AUTO_UPDATE=1 brew_cmd install go >/dev/null 2>&1; then
+        if command -v go >/dev/null 2>&1; then
+            print_ok "go installed successfully."
+            return 0
+        fi
+    fi
+
+    print_err "go installation failed."
+    return 1
+}
+
 attempt_dependency_repair() {
     local log_file="$1"
     local repaired=0
@@ -231,6 +254,13 @@ attempt_dependency_repair() {
         if brew_is_healthy; then
             print_info "Auto-fix: installing python3"
             HOMEBREW_NO_AUTO_UPDATE=1 brew_cmd install python >/dev/null 2>&1 && repaired=1
+        fi
+    fi
+
+    if grep -qiE 'command not found: go|go: command not found' "$log_file"; then
+        if brew_is_healthy; then
+            print_info "Auto-fix: installing go"
+            HOMEBREW_NO_AUTO_UPDATE=1 brew_cmd install go >/dev/null 2>&1 && repaired=1
         fi
     fi
 
