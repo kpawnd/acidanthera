@@ -247,14 +247,90 @@ resolve_reachable_url() {
     return 1
 }
 
+is_supported_package_url() {
+    local url="$1"
+    local lower=""
+    local path_only=""
+
+    lower="$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')"
+    path_only="${lower%%\?*}"
+    path_only="${path_only%%#*}"
+
+    [[ "$path_only" == *.zip || "$path_only" == *.dmg ]]
+}
+
+resolve_reachable_package_url() {
+    local candidate=""
+    local final_url=""
+
+    for candidate in "$@"; do
+        [[ -z "$candidate" ]] && continue
+        final_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' -L "$candidate" 2>/dev/null || true)"
+        if [[ -n "$final_url" ]] && is_supported_package_url "$final_url"; then
+            echo "$final_url"
+            return 0
+        fi
+    done
+
+    echo ""
+    return 1
+}
+
+is_packet_tracer_installer_bundle() {
+    local app_path="$1"
+    local name_lc=""
+    local plist="$app_path/Contents/Info.plist"
+    local bundle_id=""
+
+    [[ -d "$app_path" ]] || return 1
+
+    name_lc="$(basename "$app_path" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$name_lc" == *installer* || "$name_lc" == *setup* ]]; then
+        return 0
+    fi
+
+    if [[ -x "$app_path/Contents/MacOS/installbuilder.sh" || -f "$app_path/Contents/Resources/installbuilder.sh" ]]; then
+        return 0
+    fi
+
+    if [[ -f "$plist" ]]; then
+        bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null || true)"
+        bundle_id="$(printf '%s' "$bundle_id" | tr '[:upper:]' '[:lower:]')"
+        if [[ "$bundle_id" == *installbuilder* || "$bundle_id" == *installer* ]]; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+run_packet_tracer_installer_bundle() {
+    local app_path="$1"
+    local install_log="$2"
+    local installer_bin=""
+
+    installer_bin="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -perm -111 2>/dev/null | head -n 1)"
+    if [[ -z "$installer_bin" ]]; then
+        return 1
+    fi
+
+    if sudo "$installer_bin" --mode unattended --unattendedmodeui none >>"$install_log" 2>&1; then
+        return 0
+    fi
+
+    if sudo "$installer_bin" --mode unattended >>"$install_log" 2>&1; then
+        return 0
+    fi
+
+    return 1
+}
+
 find_installed_packet_tracer_app() {
     local candidate=""
-    local name_lc=""
 
     while IFS= read -r candidate; do
         [[ -z "$candidate" ]] && continue
-        name_lc="$(basename "$candidate" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$name_lc" == *installer* || "$name_lc" == *setup* ]]; then
+        if is_packet_tracer_installer_bundle "$candidate"; then
             continue
         fi
         echo "$candidate"
@@ -583,6 +659,7 @@ resolve_azure_data_studio_url() {
     local cask_url=""
     local fallback_url=""
     local json=""
+    local release_html=""
 
     if [[ -n "$explicit_url" ]]; then
         echo "$explicit_url"
@@ -594,7 +671,7 @@ resolve_azure_data_studio_url() {
         cask_source="$(brew_cmd cat --cask azure-data-studio 2>/dev/null || true)"
         if [[ -n "$cask_source" ]]; then
             cask_url="$(printf '%s\n' "$cask_source" | awk -F'"' '/^[[:space:]]*url ".*\.(dmg|zip)"/ {print $2; exit}')"
-            if [[ -n "$cask_url" ]]; then
+            if [[ -n "$cask_url" ]] && is_supported_package_url "$cask_url"; then
                 echo "$cask_url"
                 return 0
             fi
@@ -617,12 +694,7 @@ resolve_azure_data_studio_url() {
             -H 'User-Agent: acidanthera-installer' \
             "$releases_api_url" 2>/dev/null || true)"
     fi
-    if [[ -z "$json" ]]; then
-        echo ""
-        return 1
-    fi
-
-    if command -v python3 >/dev/null 2>&1; then
+    if [[ -n "$json" ]] && command -v python3 >/dev/null 2>&1; then
         fallback_url="$(python3 - <<PY
 import json
 
@@ -698,13 +770,25 @@ if generic:
 print("")
 PY
         )"
-        if [[ -n "$fallback_url" ]]; then
+        if [[ -n "$fallback_url" ]] && is_supported_package_url "$fallback_url"; then
             echo "$fallback_url"
             return 0
         fi
     fi
 
-    fallback_url="$(resolve_reachable_url \
+    release_html="$(curl -fsSL -H 'User-Agent: acidanthera-installer' 'https://github.com/microsoft/azuredatastudio/releases/tag/final' 2>/dev/null || true)"
+    if [[ -n "$release_html" ]]; then
+        fallback_url="$(printf '%s\n' "$release_html" \
+            | grep -Eo 'https://github\.com/microsoft/azuredatastudio/releases/download/[^"\'"'"'[:space:]]+azuredatastudio-macos-[0-9.]+\.zip' \
+            | grep -Ev 'arm64|universal' \
+            | head -n 1)"
+        if [[ -n "$fallback_url" ]] && is_supported_package_url "$fallback_url"; then
+            echo "$fallback_url"
+            return 0
+        fi
+    fi
+
+    fallback_url="$(resolve_reachable_package_url \
         "https://aka.ms/azuredatastudio-mac" \
         "https://go.microsoft.com/fwlink/?linkid=2213988")"
     if [[ -n "$fallback_url" ]]; then
@@ -897,6 +981,7 @@ install_packet_tracer() {
     local nested_pkg_path=""
     local nested_mpkg_path=""
     local nested_app_path=""
+    local installer_bundle="0"
     local installed_app
     local supported_ver="unknown"
 
@@ -962,7 +1047,8 @@ install_packet_tracer() {
 
     if [[ -n "$app_path" ]]; then
         app_name_lc="$(basename "$app_path" | tr '[:upper:]' '[:lower:]')"
-        if [[ "$app_name_lc" == *installer* || "$app_name_lc" == *setup* ]]; then
+        if is_packet_tracer_installer_bundle "$app_path"; then
+            installer_bundle="1"
             nested_pkg_path="$(find "$app_path" -maxdepth 8 -name '*.pkg' | head -n 1)"
             nested_mpkg_path="$(find "$app_path" -maxdepth 8 -name '*.mpkg' | head -n 1)"
             nested_app_path="$(find "$app_path" -maxdepth 8 -type d -name '*Packet*Tracer*.app' ! -path "$app_path" | head -n 1)"
@@ -976,6 +1062,11 @@ install_packet_tracer() {
             if [[ -n "$nested_app_path" ]]; then
                 app_path="$nested_app_path"
                 app_name_lc="$(basename "$app_path" | tr '[:upper:]' '[:lower:]')"
+                if is_packet_tracer_installer_bundle "$app_path"; then
+                    installer_bundle="1"
+                else
+                    installer_bundle="0"
+                fi
             fi
         fi
     fi
@@ -1007,19 +1098,28 @@ install_packet_tracer() {
             return 1
         fi
     elif [[ -n "$app_path" ]]; then
-        if [[ "$app_name_lc" == *installer* || "$app_name_lc" == *setup* ]]; then
-            print_warn "Found Packet Tracer installer bundle but not the actual app payload."
-            hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-            rm -f "$dmg_file" >/dev/null 2>&1 || true
-            return 1
-        fi
-        print_info "Copying Packet Tracer app bundle to /Applications"
-        sudo rm -rf "/Applications/$(basename "$app_path")" >/dev/null 2>&1 || true
-        if ! sudo ditto "$app_path" "/Applications/$(basename "$app_path")" >/dev/null 2>&1; then
-            print_warn "Packet Tracer app copy failed."
-            hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-            rm -f "$dmg_file" >/dev/null 2>&1 || true
-            return 1
+        if [[ "$installer_bundle" == "1" ]]; then
+            print_info "Running Packet Tracer installer bundle in unattended mode"
+            : >"$install_log"
+            if ! run_packet_tracer_installer_bundle "$app_path" "$install_log"; then
+                print_warn "Packet Tracer installer bundle execution failed."
+                if [[ -f "$install_log" ]]; then
+                    print_warn "Installer log (tail):"
+                    tail -n 40 "$install_log"
+                fi
+                hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+                rm -f "$dmg_file" >/dev/null 2>&1 || true
+                return 1
+            fi
+        else
+            print_info "Copying Packet Tracer app bundle to /Applications"
+            sudo rm -rf "/Applications/$(basename "$app_path")" >/dev/null 2>&1 || true
+            if ! sudo ditto "$app_path" "/Applications/$(basename "$app_path")" >/dev/null 2>&1; then
+                print_warn "Packet Tracer app copy failed."
+                hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
+                rm -f "$dmg_file" >/dev/null 2>&1 || true
+                return 1
+            fi
         fi
     else
         print_warn "No .pkg or .app found inside Packet Tracer DMG."
