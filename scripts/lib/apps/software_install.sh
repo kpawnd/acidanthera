@@ -511,61 +511,27 @@ install_android_studio_direct_dmg() {
 install_android_studio_with_fallback() {
     local app_path="/Applications/Android Studio.app"
     local stage_file="$1"
-    local brew_pid=""
-    local brew_timeout=120
-    local start_time
-    local elapsed
-    local dmg_url
 
     print_info "Attempting Android Studio installation via Homebrew..."
 
-    # Try Homebrew first with timeout
-    echo "Trying Homebrew (timeout: ${brew_timeout}s)" > "$stage_file" 2>/dev/null || true
-    start_time=$(date +%s)
-    
-    (
-        reinstall_cask_app "android-studio" "$app_path" "Android Studio" "$stage_file"
-    ) &
-    brew_pid=$!
-
-    # Wait for Homebrew with timeout
-    while kill -0 $brew_pid 2>/dev/null; do
-        elapsed=$(($(date +%s) - start_time))
-        if [[ $elapsed -gt $brew_timeout ]]; then
-            print_warn "Homebrew installation timed out after ${brew_timeout}s. Falling back to direct download."
-            kill -9 $brew_pid 2>/dev/null || true
-            break
-        fi
-        sleep 2
-    done
-
-    wait $brew_pid 2>/dev/null
-    local brew_result=$?
-
-    # If Homebrew succeeded, we're done
-    if [[ $brew_result -eq 0 ]] && [[ -d "$app_path" ]]; then
-        print_ok "Android Studio installed via Homebrew."
-        return 0
-    fi
-
-    # Check if already installed before trying CDN fallback (version check)
+    # Early exit: if already installed with acceptable version, skip everything
     if [[ -d "$app_path" ]]; then
-        local installed_ver
-        installed_ver="$(get_app_version "$app_path")"
+        local installed_ver="$(get_app_version "$app_path")"
         if [[ -n "$installed_ver" && "$installed_ver" != "unknown" ]]; then
-            print_ok "Android Studio already installed. Version: $installed_ver. Skipping reinstall."
+            echo "Verified installation" > "$stage_file" 2>/dev/null || true
+            print_ok "Android Studio already installed: $installed_ver. Skipping reinstall."
             return 0
         fi
     fi
 
-    # Fall back to direct DMG download
-    print_warn "Homebrew installation failed. Using direct download from Google CDN..."
-    dmg_url="$(get_android_studio_dmg_url)"
-    if install_android_studio_direct_dmg "$dmg_url" "$stage_file"; then
+    # Not installed or version unknown - try Homebrew
+    echo "Installing via Homebrew" > "$stage_file" 2>/dev/null || true
+    if reinstall_cask_app "android-studio" "$app_path" "Android Studio" "$stage_file"; then
         return 0
     fi
 
-    print_warn "Android Studio installation failed (both Homebrew and CDN)."
+    # If we reach here, Homebrew failed - do NOT fall back to CDN
+    print_warn "Android Studio installation via Homebrew failed. Please ensure Homebrew is working correctly."
     return 1
 }
 
