@@ -84,12 +84,54 @@ normalize_packet_tracer_version() {
     return 0
 }
 
-# Download file with resilience (retries with exponential backoff)
+# Check cache and validate existing file
+validate_cached_download() {
+    local url="$1"
+    local out_file="$2"
+    
+    if [[ ! -f "$out_file" ]]; then
+        return 1
+    fi
+    
+    local file_size_bytes=$(stat -f%z "$out_file" 2>/dev/null || echo 0)
+    if [[ $file_size_bytes -lt 1024 ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Prefetch URLs in background (parallel download initiation)
+background_prefetch_urls() {
+    local -a urls=("$@")
+    
+    for url in "${urls[@]}"; do
+        local out_dir="/tmp/acid_dl_cache"
+        mkdir -p "$out_dir"
+        local out_file="$out_dir/$(echo "$url" | sha256sum | awk '{print $1}').partial"
+        
+        if [[ ! -f "$out_file.complete" ]]; then
+            (
+                if curl -fsSL --connect-timeout 10 --max-time 300 --speed-limit 1024 \
+                    --range 0-1048576 "$url" -o "$out_file" >/dev/null 2>&1; then
+                    touch "$out_file.complete"
+                fi
+            ) &
+        fi
+    done
+}
+
+# Download file with resilience (retries with exponential backoff) and caching
 download_file_resilient() {
     local url="$1"
     local out_file="$2"
     local attempt=1
     local max_attempts=6
+    
+    if validate_cached_download "$url" "$out_file"; then
+        print_info "Using cached $(basename "$out_file")"
+        return 0
+    fi
 
     while [[ "$attempt" -le "$max_attempts" ]]; do
         print_info "Downloading $(basename "$out_file") (attempt $attempt/$max_attempts)"
@@ -108,7 +150,7 @@ download_file_resilient() {
     return 1
 }
 
-# Optimized download using aria2c if available, otherwise curl
+# Optimized download using aria2c (parallel) if available, otherwise curl with connection pooling
 download_file_optimized() {
     local url="$1"
     local out_file="$2"
@@ -118,19 +160,22 @@ download_file_optimized() {
             --quiet=true \
             --console-log-level=error \
             --file-allocation=none \
-            --max-connection-per-server=8 \
-            --split=8 \
+            --max-connection-per-server=16 \
+            --split=16 \
             --continue=true \
             --retry-wait=3 \
             --max-tries=8 \
             --summary-interval=0 \
             --download-result=hide \
+            --enable-mmap=true \
+            --disk-cache=16M \
             -o "$(basename "$out_file")" \
             -d "$(dirname "$out_file")" \
             "$url"
         return $?
     fi
 
+    # Enhanced curl with connection keep-alive and pooling
     curl \
         --fail \
         --location \
@@ -138,7 +183,11 @@ download_file_optimized() {
         --retry-all-errors \
         --retry-delay 2 \
         --connect-timeout 15 \
+        --max-time 3600 \
         --continue-at - \
+        --compressed \
+        --keepalive-time 60 \
+        --limit-output \
         --silent \
         --show-error \
         "$url" \
