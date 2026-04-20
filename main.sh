@@ -24,6 +24,8 @@ source "$SCRIPT_DIR/scripts/lib/apps/cleanup_deepfreeze.sh"
 source "$SCRIPT_DIR/scripts/lib/apps/software_install.sh"
 # shellcheck source=scripts/lib/system/config.sh
 source "$SCRIPT_DIR/scripts/lib/system/config.sh"
+# shellcheck source=scripts/lib/system/lockscreen_config.sh
+source "$SCRIPT_DIR/scripts/lib/system/lockscreen_config.sh"
 # shellcheck source=scripts/lib/system/monitoring.sh
 source "$SCRIPT_DIR/scripts/lib/system/monitoring.sh"
 
@@ -46,6 +48,7 @@ main() {
     run_step "Create sysmon command" create_sysmon_command
     run_step "Configure bash alias" ensure_bash_alias
     run_step "Configure power management" configure_power_management
+    run_step "Configure lockscreen background" configure_lockscreen_background
     run_step_interactive "Install required software" install_required_software
 
     print_summary
