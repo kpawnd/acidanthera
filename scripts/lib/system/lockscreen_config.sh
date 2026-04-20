@@ -7,6 +7,8 @@
 configure_lockscreen_background() {
     local image_url="${LOCKSCREEN_IMAGE_URL:-https://wall.tasw.qzz.io/mac.png}"
     local image_file="/tmp/lockscreen_bg.png"
+    local persistent_dir="/Library/Application Support/Acidanthera"
+    local persistent_image="$persistent_dir/lockscreen_bg.png"
     local lock_plist="/Library/Preferences/com.apple.loginwindow"
     
     print_info "Downloading lockscreen image..."
@@ -23,6 +25,19 @@ configure_lockscreen_background() {
         rm -f "$image_file"
         return 1
     fi
+
+    # Persist the image to a system path so settings survive script exit.
+    if ! sudo mkdir -p "$persistent_dir"; then
+        print_warn "Failed to create lockscreen directory: $persistent_dir"
+        rm -f "$image_file"
+        return 1
+    fi
+    if ! sudo cp "$image_file" "$persistent_image"; then
+        print_warn "Failed to copy lockscreen image to $persistent_image"
+        rm -f "$image_file"
+        return 1
+    fi
+    sudo chmod 644 "$persistent_image" >/dev/null 2>&1 || true
     
     # Check if SIP is disabled (OCLP system)
     local sip_enabled=true
@@ -33,17 +48,17 @@ configure_lockscreen_background() {
     
     # For SIP-disabled systems (OCLP), replace actual lockscreen images
     if [[ "$sip_enabled" == "false" ]]; then
-        _apply_lockscreen_sip_disabled "$image_file"
+        _apply_lockscreen_sip_disabled "$persistent_image"
     fi
     
     # Always set login window background (works with or without SIP)
     print_info "Setting login window background..."
     
     # Copy to system location
-    sudo cp "$image_file" /Library/Caches/com.apple.loginwindow/lockscreen_bg.png 2>/dev/null || true
+    sudo cp "$persistent_image" /Library/Caches/com.apple.loginwindow/lockscreen_bg.png 2>/dev/null || true
     
     # Set via defaults (Monterey-Sequoia compatible)
-    if ! sudo defaults write "$lock_plist" "DesktopPicture" "$image_file" >/dev/null 2>&1; then
+    if ! sudo defaults write "$lock_plist" "DesktopPicture" "$persistent_image" >/dev/null 2>&1; then
         print_warn "Failed to set login window background via defaults"
     fi
     
@@ -58,20 +73,13 @@ configure_lockscreen_background() {
         osascript <<EOF 2>/dev/null || true
 tell application "System Events"
     set theDesktop to the desktop
-    set the picture of theDesktop to "$image_file"
+    set the picture of theDesktop to "$persistent_image"
 end tell
 EOF
     fi
-    
-    # Restart loginwindow to apply changes
-    print_info "Applying lockscreen changes..."
-    
-    if pgrep -x loginwindow >/dev/null; then
-        sudo killall -HUP loginwindow 2>/dev/null || true
-        sleep 2
-    fi
-    
+
     rm -f "$image_file"
+    print_info "Lockscreen update saved. It applies on next lock screen/reboot without logging out current users."
     print_ok "Lockscreen background configured"
     return 0
 }
@@ -103,34 +111,6 @@ _apply_lockscreen_sip_disabled() {
     sudo defaults write /Library/Preferences/com.apple.loginwindow \
         "LockScreenImage" "$image_file" 2>/dev/null || true
     
-    # Create lock screen LaunchAgent to persist across updates
-    local launchagent_dir="$HOME/Library/LaunchAgents"
-    local launchagent_file="$launchagent_dir/com.lab.lockscreen.plist"
-    
-    mkdir -p "$launchagent_dir"
-    
-    cat > "$launchagent_file" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.lab.lockscreen</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>-c</string>
-        <string>defaults write /Library/Preferences/com.apple.loginwindow DesktopPicture "$LOCKSCREEN_IMAGE_PATH" 2>/dev/null && killall -HUP loginwindow 2>/dev/null || true</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StartInterval</key>
-    <integer>3600</integer>
-</dict>
-</plist>
-EOF
-    
-    launchctl load "$launchagent_file" 2>/dev/null || true
     print_ok "Lockscreen replacement applied (SIP disabled)"
 }
 
