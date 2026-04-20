@@ -20,6 +20,37 @@ apply_wallpaper_for_user() {
         -e 'end tell' >/dev/null 2>&1
 }
 
+apply_lockscreen_cache_for_user() {
+    local target_user="$1"
+    local image_path="$2"
+    local generated_uid
+    local cache_dir
+    local wrote=false
+
+    generated_uid="$(dscl . -read "/Users/$target_user" GeneratedUID 2>/dev/null | awk '{print $2}')"
+    if [[ -z "$generated_uid" ]]; then
+        return 1
+    fi
+
+    cache_dir="/Library/Caches/Desktop Pictures/$generated_uid"
+    if sudo mkdir -p "$cache_dir"; then
+        if sudo cp "$image_path" "$cache_dir/lockscreen.png"; then
+            wrote=true
+        fi
+        # Some versions read JPG in this cache path.
+        sudo cp "$image_path" "$cache_dir/lockscreen.jpg" >/dev/null 2>&1 || true
+        sudo chmod 644 "$cache_dir/lockscreen.png" "$cache_dir/lockscreen.jpg" >/dev/null 2>&1 || true
+        sudo chown root:wheel "$cache_dir/lockscreen.png" "$cache_dir/lockscreen.jpg" >/dev/null 2>&1 || true
+    fi
+
+    # Compatibility path used by some loginwindow flows.
+    sudo cp "$image_path" /Library/Caches/com.apple.desktop.admin.png >/dev/null 2>&1 || true
+    sudo chmod 644 /Library/Caches/com.apple.desktop.admin.png >/dev/null 2>&1 || true
+    sudo chown root:wheel /Library/Caches/com.apple.desktop.admin.png >/dev/null 2>&1 || true
+
+    [[ "$wrote" == "true" ]]
+}
+
 configure_lockscreen_background() {
     local image_url="${LOCKSCREEN_IMAGE_URL:-https://wall.tasw.qzz.io/mac.png}"
     local image_file="/tmp/lockscreen_bg.png"
@@ -78,18 +109,26 @@ configure_lockscreen_background() {
         print_warn "Failed to set login window background via defaults"
     fi
     
-    # Set wallpaper for all users (post-login background)
-    print_info "Applying wallpaper to active user..."
+    # Apply true lockscreen cache for active user.
+    print_info "Applying lockscreen cache for active user..."
     
     local current_user
     current_user="$(stat -f%Su /dev/console 2>/dev/null || whoami)"
     
     if [[ -n "$current_user" && "$current_user" != "root" ]]; then
-        # Set wallpaper in the user's GUI session so lock screen (user context) picks it up.
-        if apply_wallpaper_for_user "$current_user" "$persistent_image"; then
-            print_info "Wallpaper updated for user: $current_user"
+        if apply_lockscreen_cache_for_user "$current_user" "$persistent_image"; then
+            print_info "Lockscreen cache updated for user: $current_user"
         else
-            print_warn "Could not update wallpaper in GUI session for $current_user"
+            print_warn "Could not update lockscreen cache for $current_user"
+        fi
+
+        # Optional: keep desktop wallpaper in sync when requested.
+        if [[ "${LOCKSCREEN_SET_WALLPAPER:-0}" == "1" ]]; then
+            if apply_wallpaper_for_user "$current_user" "$persistent_image"; then
+                print_info "Wallpaper updated for user: $current_user"
+            else
+                print_warn "Could not update wallpaper in GUI session for $current_user"
+            fi
         fi
     fi
 
