@@ -314,6 +314,25 @@ is_packet_tracer_installer_bundle() {
 find_installed_packet_tracer_app() {
     local candidate=""
 
+    # Common direct app names in /Applications
+    while IFS= read -r candidate; do
+        [[ -z "$candidate" ]] && continue
+        if is_packet_tracer_installer_bundle "$candidate"; then
+            continue
+        fi
+        echo "$candidate"
+        return 0
+    done < <(find /Applications -maxdepth 2 -type d \( -name 'Packet Tracer.app' -o -name 'PacketTracer.app' -o -name 'Cisco Packet Tracer.app' -o -name 'Cisco Packet Tracer*.app' \) 2>/dev/null)
+
+    # Some releases install as versioned directories without .app bundle at root.
+    while IFS= read -r candidate; do
+        [[ -z "$candidate" ]] && continue
+        if [[ -x "$candidate/bin/PacketTracer" || -x "$candidate/PacketTracer" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done < <(find /Applications -maxdepth 3 -type d -name 'Cisco Packet Tracer*' 2>/dev/null)
+
     # First try direct match in /Applications
     while IFS= read -r candidate; do
         [[ -z "$candidate" ]] && continue
@@ -490,6 +509,44 @@ get_brew_cask_version() {
     fi
 }
 
+# Resolve installed app bundle path across common install locations.
+resolve_installed_app_path() {
+    local expected_path="$1"
+    local base_name=""
+    local stem_name=""
+    local candidate=""
+
+    if [[ -z "$expected_path" ]]; then
+        echo ""
+        return 1
+    fi
+
+    if [[ -d "$expected_path" ]]; then
+        echo "$expected_path"
+        return 0
+    fi
+
+    base_name="$(basename "$expected_path")"
+    stem_name="${base_name%.app}"
+
+    candidate="$HOME/Applications/$base_name"
+    if [[ -d "$candidate" ]]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    while IFS= read -r candidate; do
+        [[ -z "$candidate" ]] && continue
+        if [[ -d "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done < <(find /Applications "$HOME/Applications" -maxdepth 3 -type d -iname "${stem_name}*.app" 2>/dev/null | head -n 10)
+
+    echo ""
+    return 1
+}
+
 # Install or update a Homebrew cask
 reinstall_cask_app() {
     local token="$1"
@@ -498,6 +555,7 @@ reinstall_cask_app() {
     local stage_file="${4:-}"
     local supported_ver="unknown"
     local installed_ver=""
+    local installed_path=""
     local attempt=1
     local max_attempts=3
 
@@ -512,15 +570,16 @@ reinstall_cask_app() {
     fi
 
     # Fast path: Check if app is already installed locally FIRST
-    if [[ -d "$app_path" ]]; then
+    installed_path="$(resolve_installed_app_path "$app_path")"
+    if [[ -n "$installed_path" ]]; then
         echo "Checking installed version" > "$stage_file" 2>/dev/null || true
-        installed_ver="$(get_app_version "$app_path")"
+        installed_ver="$(get_app_version "$installed_path")"
         if [[ -n "$installed_ver" && "$installed_ver" != "unknown" ]]; then
             echo "Checking supported version" > "$stage_file" 2>/dev/null || true
             supported_ver="$(get_brew_cask_version "$token")"
             if [[ "$supported_ver" != "unknown" ]] && versions_match_latest "$installed_ver" "$supported_ver"; then
                 print_ok "$display_name already at latest supported version ($installed_ver). Skipping reinstall."
-                record_cask_lock "$token" "$app_path" || true
+                record_cask_lock "$token" "$installed_path" || true
                 return 0
             fi
         fi
@@ -550,6 +609,11 @@ reinstall_cask_app() {
             fi
         fi
     fi
+    if [[ -n "$installed_path" && "$installed_path" != "$app_path" && -d "$installed_path" ]]; then
+        if ! sudo -n rm -rf "$installed_path" 2>/dev/null; then
+            sudo rm -rf "$installed_path" 2>/dev/null || true
+        fi
+    fi
 
     while [[ "$attempt" -le "$max_attempts" ]]; do
         resolve_brew_download_locks_for_token "$token" || true
@@ -576,13 +640,14 @@ reinstall_cask_app() {
     fi
 
     echo "Verifying installation" > "$stage_file" 2>/dev/null || true
-    if [[ -d "$app_path" ]]; then
-        print_ok "$display_name installed. Version: $(get_app_version "$app_path")"
+    installed_path="$(resolve_installed_app_path "$app_path")"
+    if [[ -n "$installed_path" ]]; then
+        print_ok "$display_name installed. Version: $(get_app_version "$installed_path")"
     else
         print_warn "$display_name install command completed but app bundle not found at $app_path"
     fi
 
-    record_cask_lock "$token" "$app_path" || true
+    record_cask_lock "$token" "${installed_path:-$app_path}" || true
     return 0
 }
 
@@ -594,21 +659,21 @@ verify_required_software_present() {
     local azure_app="/Applications/Azure Data Studio.app"
     local packet_tracer_app=""
 
-    if [[ -d "$blender_app" ]]; then
+    if [[ -n "$(resolve_installed_app_path "$blender_app")" ]]; then
         print_ok "Verified Blender installation."
     else
         print_warn "Blender is not installed at expected path: $blender_app"
         had_error=1
     fi
 
-    if [[ -d "$android_app" ]]; then
+    if [[ -n "$(resolve_installed_app_path "$android_app")" ]]; then
         print_ok "Verified Android Studio installation."
     else
         print_warn "Android Studio is not installed at expected path: $android_app"
         had_error=1
     fi
 
-    if [[ -d "$azure_app" ]]; then
+    if [[ -n "$(resolve_installed_app_path "$azure_app")" ]]; then
         print_ok "Verified Azure Data Studio installation."
     else
         print_warn "Azure Data Studio is not installed at expected path: $azure_app"

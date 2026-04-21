@@ -119,7 +119,7 @@ install_cask_homebrew_only() {
         return 1
     fi
 
-    if [[ -d "$app_path" ]]; then
+    if [[ -n "$(resolve_installed_app_path "$app_path")" ]]; then
         print_ok "$display_name installed via local Homebrew override."
         return 0
     fi

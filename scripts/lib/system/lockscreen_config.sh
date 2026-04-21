@@ -128,8 +128,14 @@ configure_lockscreen_background() {
     # Always set loginwindow-related image paths (works with or without SIP)
     print_info "Applying loginwindow image paths..."
     
-    # Copy to system location
-    sudo cp "$persistent_image" /Library/Caches/com.apple.loginwindow/lockscreen_bg.png 2>/dev/null || true
+    # Copy to system location (best-effort cache path; not present on all builds)
+    sudo mkdir -p /Library/Caches/com.apple.loginwindow >/dev/null 2>&1 || true
+    if sudo cp "$persistent_image" /Library/Caches/com.apple.loginwindow/lockscreen_bg.png >/dev/null 2>&1; then
+        total_checks=$((total_checks + 1))
+        print_ok "Check $total_checks: loginwindow cache file write"
+    else
+        print_warn "Could not write optional cache file: /Library/Caches/com.apple.loginwindow/lockscreen_bg.png"
+    fi
     
     # Set via defaults (Monterey-Sequoia compatible)
     if ! sudo defaults write "$lock_plist" "DesktopPicture" "$persistent_image" >/dev/null 2>&1; then
@@ -196,8 +202,7 @@ configure_lockscreen_background() {
         total_checks=$((total_checks + 1))
         print_ok "Check $total_checks: loginwindow cache file exists"
     else
-        print_warn "loginwindow cache file missing: /Library/Caches/com.apple.loginwindow/lockscreen_bg.png"
-        failed_checks=$((failed_checks + 1))
+        print_warn "Optional cache file missing: /Library/Caches/com.apple.loginwindow/lockscreen_bg.png"
     fi
 
     if [[ -n "$current_user" && "$current_user" != "root" ]]; then
