@@ -26,195 +26,92 @@ resolve_release_repo() {
     return 1
 }
 
-get_azure_data_studio_supported_version() {
-    local supported_ver="unknown"
-    local download_url=""
+resolve_homebrew_package_file() {
+    local package_name="$1"
+    local package_type="$2"
+    local brew_repo=""
+    local search_root=""
 
-    download_url="$(resolve_azure_data_studio_url)"
-    supported_ver="$(extract_version_from_url "$download_url")"
-    echo "$supported_ver"
-    return 0
-}
-
-resolve_azure_data_studio_url() {
-    local explicit_url="${AZURE_DATA_STUDIO_URL:-}"
-    local release_repo=""
-    local json=""
-    local zip_url=""
-
-    if [[ -n "$explicit_url" ]]; then
-        echo "$explicit_url"
-        return 0
+    brew_repo="$(brew_cmd --repository 2>/dev/null || true)"
+    if [[ -z "$brew_repo" ]]; then
+        if [[ -d /opt/homebrew ]]; then
+            brew_repo="/opt/homebrew"
+        elif [[ -d /usr/local/Homebrew ]]; then
+            brew_repo="/usr/local/Homebrew"
+        fi
     fi
 
-    release_repo="$(resolve_release_repo)"
-    if [[ -z "$release_repo" ]]; then
+    if [[ -z "$brew_repo" ]]; then
         return 1
     fi
 
-    json="$(curl -fsSL \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'User-Agent: lab-installer' \
-        "https://api.github.com/repos/${release_repo}/releases/tags/Azure" 2>/dev/null || true)"
-
-    if [[ -n "$json" ]]; then
-        local py_lib="${PY_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/py}"
-        
-        if command -v python3 >/dev/null 2>&1; then
-            zip_url="$(echo "$json" | python3 "$py_lib/github_utils.py" azure-asset 2>/dev/null)"
-            if [[ -n "$zip_url" && "$zip_url" != "Unknown error" ]]; then
-                echo "$zip_url"
-                return 0
-            fi
-        fi
-    fi
-
-    return 1
-}
-
-install_azure_data_studio_direct() {
-    local download_url=""
-    local target_app="/Applications/Azure Data Studio.app"
-    local mount_point="/tmp/azure_data_studio_mount"
-    local work_dir="/tmp/azure_data_studio_extract"
-    local dmg_file="/tmp/azure_data_studio.dmg"
-    local zip_file="/tmp/azure_data_studio.zip"
-    local app_path=""
-    local supported_ver="unknown"
-    local stage_file="${1:-}"
-
-    print_info "Installing Azure Data Studio..."
-
-    supported_ver="$(get_azure_data_studio_supported_version)"
-    if should_skip_direct_install "$target_app" "Azure Data Studio" "$supported_ver"; then
-        echo "Already installed - skipping" > "$stage_file" 2>/dev/null || true
-        return 0
-    fi
-
-    echo "Resolving download URL" > "$stage_file" 2>/dev/null || true
-    download_url="$(resolve_azure_data_studio_url)"
-    if [[ -z "$download_url" ]]; then
-        print_warn "Could not resolve Azure Data Studio download URL."
-        return 1
-    fi
-
-    sudo rm -rf "$target_app" >/dev/null 2>&1 || true
-
-    if [[ "$download_url" == *.dmg ]]; then
-        rm -f "$dmg_file" >/dev/null 2>&1 || true
-        echo "Downloading Azure Data Studio" > "$stage_file" 2>/dev/null || true
-        monitor_download_progress "$dmg_file" "$stage_file" "Azure Data Studio" "$(get_remote_file_size "$download_url")" &
-        local monitor_pid=$!
-        if ! download_file_resilient "$download_url" "$dmg_file"; then
-            kill $monitor_pid 2>/dev/null || true
-            wait $monitor_pid 2>/dev/null || true
-            print_warn "Azure Data Studio DMG download failed after retries."
-            return 1
-        fi
-        kill $monitor_pid 2>/dev/null || true
-        wait $monitor_pid 2>/dev/null || true
-
-        echo "Verifying download" > "$stage_file" 2>/dev/null || true
-        if ! hdiutil verify "$dmg_file" >/dev/null 2>&1; then
-            print_warn "Downloaded Azure Data Studio DMG failed integrity verification."
-            return 1
-        fi
-
-        rm -rf "$mount_point" >/dev/null 2>&1 || true
-        mkdir -p "$mount_point" || return 1
-
-        echo "Mounting DMG" > "$stage_file" 2>/dev/null || true
-        if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
-            print_warn "Failed to mount Azure Data Studio DMG."
-            rm -f "$dmg_file" >/dev/null 2>&1 || true
-            return 1
-        fi
-
-        echo "Locating app bundle" > "$stage_file" 2>/dev/null || true
-        app_path="$(find "$mount_point" -maxdepth 4 -type d -name 'Azure Data Studio.app' | head -n 1)"
-        if [[ -z "$app_path" ]]; then
-            app_path="$(find "$mount_point" -maxdepth 4 -type d -name '*.app' | head -n 1)"
-        fi
-
-        if [[ -z "$app_path" ]]; then
-            print_warn "Azure Data Studio app bundle was not found in mounted DMG."
-            hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-            rm -f "$dmg_file" >/dev/null 2>&1 || true
-            return 1
-        fi
-
-        echo "Copying to /Applications" > "$stage_file" 2>/dev/null || true
-        if ! sudo -n ditto "$app_path" "$target_app" >/dev/null 2>&1; then
-            if ! sudo ditto "$app_path" "$target_app" >/dev/null 2>&1; then
-                print_warn "Failed to copy Azure Data Studio to /Applications."
-                hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-                rm -f "$dmg_file" >/dev/null 2>&1 || true
-                return 1
-            fi
-        fi
-
-        echo "Cleaning up" > "$stage_file" 2>/dev/null || true
-        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-        rm -f "$dmg_file" >/dev/null 2>&1 || true
-
-    elif [[ "$download_url" == *.zip ]]; then
-        rm -f "$zip_file" >/dev/null 2>&1 || true
-        rm -rf "$work_dir" >/dev/null 2>&1 || true
-        mkdir -p "$work_dir" || return 1
-
-        echo "Downloading Azure Data Studio" > "$stage_file" 2>/dev/null || true
-        monitor_download_progress "$zip_file" "$stage_file" "Azure Data Studio" "$(get_remote_file_size "$download_url")" &
-        local monitor_pid=$!
-        if ! download_file_resilient "$download_url" "$zip_file"; then
-            kill $monitor_pid 2>/dev/null || true
-            wait $monitor_pid 2>/dev/null || true
-            print_warn "Azure Data Studio zip download failed after retries."
-            return 1
-        fi
-        kill $monitor_pid 2>/dev/null || true
-        wait $monitor_pid 2>/dev/null || true
-
-        echo "Extracting archive" > "$stage_file" 2>/dev/null || true
-        if ! unzip -q "$zip_file" -d "$work_dir"; then
-            print_warn "Failed to extract Azure Data Studio zip archive."
-            rm -f "$zip_file" >/dev/null 2>&1 || true
-            rm -rf "$work_dir" >/dev/null 2>&1 || true
-            return 1
-        fi
-
-        echo "Locating app bundle" > "$stage_file" 2>/dev/null || true
-        app_path="$(find "$work_dir" -maxdepth 2 -type d -name '*.app' | head -n 1)"
-
-        if [[ -z "$app_path" ]]; then
-            print_warn "Azure Data Studio app bundle was not found in extracted archive."
-            rm -f "$zip_file" >/dev/null 2>&1 || true
-            rm -rf "$work_dir" >/dev/null 2>&1 || true
-            return 1
-        fi
-
-        echo "Copying to /Applications" > "$stage_file" 2>/dev/null || true
-        if ! ditto "$app_path" "$target_app"; then
-            print_warn "Failed to copy Azure Data Studio to /Applications."
-            rm -f "$zip_file" >/dev/null 2>&1 || true
-            rm -rf "$work_dir" >/dev/null 2>&1 || true
-            return 1
-        fi
-
-        echo "Cleaning up" > "$stage_file" 2>/dev/null || true
-        rm -f "$zip_file" >/dev/null 2>&1 || true
-        rm -rf "$work_dir" >/dev/null 2>&1 || true
+    if [[ "$package_type" == "cask" ]]; then
+        search_root="$brew_repo/Library/Taps/homebrew/homebrew-cask/Casks"
     else
-        print_warn "Unsupported Azure Data Studio package type: $download_url"
+        search_root="$brew_repo/Library/Taps/homebrew/homebrew-core/Formula"
+    fi
+
+    [[ -d "$search_root" ]] || return 1
+    find "$search_root" -type f -name "${package_name}.rb" | head -n 1
+}
+
+install_disabled_homebrew_package_local_override() {
+    local package_name="$1"
+    local package_type="$2"
+    local stage_file="${3:-}"
+    local source_file=""
+    local override_root="/tmp/atherion-homebrew-overrides"
+    local override_file=""
+
+    source_file="$(resolve_homebrew_package_file "$package_name" "$package_type")"
+    if [[ -z "$source_file" ]]; then
+        print_warn "Could not locate local Homebrew definition for $package_name."
         return 1
     fi
 
-    if [[ -d "$target_app" ]]; then
-        print_ok "Azure Data Studio installed. Version: $(get_app_version "$target_app")"
+    mkdir -p "$override_root" || return 1
+    override_file="$override_root/${package_name}.rb"
+    cp "$source_file" "$override_file" || return 1
+
+    # Remove disable! guard so Homebrew can evaluate local override.
+    sed -E -i '' '/^[[:space:]]*disable![[:space:]].*$/d' "$override_file"
+
+    echo "Installing local override" > "$stage_file" 2>/dev/null || true
+    if [[ "$package_type" == "cask" ]]; then
+        HOMEBREW_NO_INSTALL_FROM_API=1 HOMEBREW_NO_AUTO_UPDATE=1 brew_cmd install --cask "$override_file" >/dev/null 2>&1
+    else
+        HOMEBREW_NO_INSTALL_FROM_API=1 HOMEBREW_NO_AUTO_UPDATE=1 brew_cmd install "$override_file" >/dev/null 2>&1
+    fi
+}
+
+install_cask_homebrew_only() {
+    local token="$1"
+    local app_path="$2"
+    local display_name="$3"
+    local stage_file="${4:-}"
+
+    print_info "Installing $display_name via Homebrew cask..."
+    if reinstall_cask_app "$token" "$app_path" "$display_name" "$stage_file"; then
         return 0
     fi
 
-    print_warn "Azure Data Studio installation completed but app was not found at $target_app"
+    print_warn "$display_name cask install failed. Trying local override for disabled package."
+    if ! install_disabled_homebrew_package_local_override "$token" "cask" "$stage_file"; then
+        return 1
+    fi
+
+    if [[ -d "$app_path" ]]; then
+        print_ok "$display_name installed via local Homebrew override."
+        return 0
+    fi
+
+    print_warn "$display_name install completed but app bundle not found at $app_path"
     return 1
+}
+
+install_azure_data_studio_homebrew() {
+    local stage_file="${1:-}"
+    install_cask_homebrew_only "azure-data-studio" "/Applications/Azure Data Studio.app" "Azure Data Studio" "$stage_file"
 }
 
 # ============================================================================
@@ -416,155 +313,9 @@ install_packet_tracer() {
     return 0
 }
 
-get_android_studio_dmg_url() {
-    local explicit_url="${ANDROID_STUDIO_DMG_URL:-}"
-    local release_repo=""
-    local json=""
-    local dmg_url=""
-
-    if [[ -n "$explicit_url" ]]; then
-        echo "$explicit_url"
-        return 0
-    fi
-
-    local py_lib="${PY_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/py}"
-
-    release_repo="$(resolve_release_repo)"
-    if [[ -z "$release_repo" ]]; then
-        return 1
-    fi
-
-    if command -v python3 >/dev/null 2>&1; then
-        json="$(curl -fsSL \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'User-Agent: lab-installer' \
-            "https://api.github.com/repos/${release_repo}/releases/tags/Android" 2>/dev/null || true)"
-        if [[ -n "$json" ]]; then
-            dmg_url="$(echo "$json" | python3 "$py_lib/github_utils.py" android-asset 2>/dev/null)"
-            if [[ -n "$dmg_url" && "$dmg_url" != "Unknown error" ]]; then
-                echo "$dmg_url"
-                return 0
-            fi
-        fi
-    fi
-
-    return 1
-}
-
-install_android_studio_direct_dmg() {
-    local dmg_url="$1"
-    local dmg_file="/tmp/android_studio.dmg"
-    local mount_point="/tmp/android_studio_mount"
-    local app_path=""
-    local target_app="/Applications/Android Studio.app"
-    local stage_file="$2"
-    local file_size
-
-    print_info "Downloading Android Studio from release..."
-    
-    rm -f "$dmg_file" >/dev/null 2>&1 || true
-    
-    echo "Resolving file size" > "$stage_file" 2>/dev/null || true
-    file_size="$(get_remote_file_size "$dmg_url")"
-    
-    echo "Downloading Android Studio" > "$stage_file" 2>/dev/null || true
-    monitor_download_progress "$dmg_file" "$stage_file" "Android Studio" "$file_size" &
-    local monitor_pid=$!
-    if ! download_file_resilient "$dmg_url" "$dmg_file"; then
-        kill $monitor_pid 2>/dev/null || true
-        wait $monitor_pid 2>/dev/null || true
-        print_warn "Android Studio download failed."
-        return 1
-    fi
-    kill $monitor_pid 2>/dev/null || true
-    wait $monitor_pid 2>/dev/null || true
-
-    echo "Verifying download" > "$stage_file" 2>/dev/null || true
-    if ! hdiutil verify "$dmg_file" >/dev/null 2>&1; then
-        print_warn "Downloaded Android Studio DMG failed verification."
-        rm -f "$dmg_file" >/dev/null 2>&1 || true
-        return 1
-    fi
-
-    rm -rf "$mount_point" >/dev/null 2>&1 || true
-    mkdir -p "$mount_point" || return 1
-
-    echo "Mounting DMG" > "$stage_file" 2>/dev/null || true
-    if ! hdiutil attach "$dmg_file" -quiet -nobrowse -mountpoint "$mount_point" >/dev/null 2>&1; then
-        print_warn "Failed to mount Android Studio DMG."
-        rm -f "$dmg_file" >/dev/null 2>&1 || true
-        return 1
-    fi
-
-    echo "Locating app" > "$stage_file" 2>/dev/null || true
-    app_path="$(find "$mount_point" -maxdepth 4 -type d -name 'Android Studio.app' | head -n 1)"
-    if [[ -z "$app_path" ]]; then
-        app_path="$(find "$mount_point" -maxdepth 4 -type d -name '*.app' | head -n 1)"
-    fi
-
-    if [[ -z "$app_path" ]]; then
-        print_warn "Android Studio app not found in DMG."
-        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-        rm -f "$dmg_file" >/dev/null 2>&1 || true
-        return 1
-    fi
-
-    echo "Installing" > "$stage_file" 2>/dev/null || true
-    sudo rm -rf "$target_app" >/dev/null 2>&1 || true
-    if ! sudo ditto "$app_path" "$target_app" >/dev/null 2>&1; then
-        print_warn "Failed to copy Android Studio to /Applications."
-        hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-        rm -f "$dmg_file" >/dev/null 2>&1 || true
-        return 1
-    fi
-
-    echo "Cleanup" > "$stage_file" 2>/dev/null || true
-    hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true
-    rm -f "$dmg_file" >/dev/null 2>&1 || true
-
-    if [[ -d "$target_app" ]]; then
-        print_ok "Android Studio installed from release."
-        return 0
-    fi
-
-    print_warn "Android Studio install completed but app not found."
-    return 1
-}
-
-install_android_studio_with_fallback() {
-    local app_path="/Applications/Android Studio.app"
-    local stage_file="$1"
-    local dmg_url=""
-    local supported_ver="unknown"
-
-    if [[ -n "$stage_file" ]]; then
-        echo "Checking app" > "$stage_file"
-    fi
-
-    print_info "Installing Android Studio from release..."
-
-    echo "Resolving release URL" > "$stage_file" 2>/dev/null || true
-    dmg_url="$(get_android_studio_dmg_url)"
-    if [[ -z "$dmg_url" ]]; then
-        print_warn "Could not resolve Android Studio DMG URL from release tag 'Android'."
-        print_warn "Set ANDROID_STUDIO_DMG_URL to override with an explicit URL."
-        return 1
-    fi
-
-    supported_ver="$(extract_version_from_url "$dmg_url")"
-
-    if should_skip_direct_install "$app_path" "Android Studio" "$supported_ver"; then
-        echo "Already installed - skipping" > "$stage_file" 2>/dev/null || true
-        return 0
-    fi
-
-    echo "Installing from release" > "$stage_file" 2>/dev/null || true
-    if install_android_studio_direct_dmg "$dmg_url" "$stage_file"; then
-        return 0
-    fi
-
-    print_warn "Android Studio installation from release failed."
-    return 1
+install_android_studio_homebrew() {
+    local stage_file="${1:-}"
+    install_cask_homebrew_only "android-studio" "/Applications/Android Studio.app" "Android Studio" "$stage_file"
 }
 
 install_required_software() {
@@ -580,10 +331,10 @@ install_required_software() {
     reinstall_cask_app "blender" "/Applications/Blender.app" "Blender" "$stage_blender" &
     spinner_wait_with_stages $! "Installing Blender" "$stage_blender" || had_error=1
 
-    install_android_studio_with_fallback "$stage_android" &
+    install_android_studio_homebrew "$stage_android" &
     spinner_wait_with_stages $! "Installing Android Studio" "$stage_android" || had_error=1
 
-    install_azure_data_studio_direct "$stage_azure" &
+    install_azure_data_studio_homebrew "$stage_azure" &
     spinner_wait_with_stages $! "Installing Azure Data Studio" "$stage_azure" || had_error=1
 
     install_packet_tracer "$stage_packet" &

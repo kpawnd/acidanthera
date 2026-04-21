@@ -101,26 +101,6 @@ validate_cached_download() {
     return 0
 }
 
-# Prefetch URLs in background (parallel download initiation)
-background_prefetch_urls() {
-    local -a urls=("$@")
-    
-    for url in "${urls[@]}"; do
-        local out_dir="/tmp/acid_dl_cache"
-        mkdir -p "$out_dir"
-        local out_file="$out_dir/$(echo "$url" | sha256sum | awk '{print $1}').partial"
-        
-        if [[ ! -f "$out_file.complete" ]]; then
-            (
-                if curl -fsSL --connect-timeout 10 --max-time 300 --speed-limit 1024 \
-                    --range 0-1048576 "$url" -o "$out_file" >/dev/null 2>&1; then
-                    touch "$out_file.complete"
-                fi
-            ) &
-        fi
-    done
-}
-
 # Download file with resilience (retries with exponential backoff) and caching
 download_file_resilient() {
     local url="$1"

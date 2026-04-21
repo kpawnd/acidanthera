@@ -74,140 +74,147 @@ configure_power_management() {
     return 0
 }
 
-configure_performance_tweaks() {
-    local had_error=0
+optimize_login_and_background_items() {
+    local current_user
+    local current_uid
+    local removed_login_items=0
+    local disabled_agents=0
 
-    print_info "Applying performance tweaks..."
-
-    if ! sudo mdutil -a -i off >/dev/null 2>&1; then
-        print_warn "Failed to disable Spotlight indexing."
-        had_error=1
+    current_user="${SUDO_USER:-$(stat -f%Su /dev/console 2>/dev/null || whoami)}"
+    if [[ -z "$current_user" || "$current_user" == "root" ]]; then
+        print_info "No non-root console user detected; skipping login item optimization."
+        return 0
     fi
 
-    if ! defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false; then
-        print_warn "Failed to disable automatic window animations."
-        had_error=1
-    fi
-    if ! defaults write NSGlobalDomain NSWindowResizeTime -float 0.001; then
-        print_warn "Failed to reduce window resize animation time."
-        had_error=1
-    fi
-    if ! defaults write com.apple.dock launchanim -bool false; then
-        print_warn "Failed to disable Dock launch animation."
-        had_error=1
+    current_uid="$(id -u "$current_user" 2>/dev/null || true)"
+    if [[ -z "$current_uid" ]]; then
+        print_warn "Could not determine UID for $current_user; skipping login item optimization."
+        return 0
     fi
 
-    defaults write com.apple.dashboard mcx-disabled -boolean YES >/dev/null 2>&1 || true
+    print_info "Optimizing login/background items for $current_user..."
 
-    if ! defaults write com.apple.dock expose-animation-duration -float 0; then
-        print_warn "Failed to set expose animation duration."
-        had_error=1
-    fi
-    defaults write com.apple.dock springboard-show-duration -int 0 >/dev/null 2>&1 || true
-    defaults write com.apple.dock springboard-hide-duration -int 0 >/dev/null 2>&1 || true
-
-    if ! killall Dock >/dev/null 2>&1; then
-        print_warn "Could not restart Dock automatically."
-        had_error=1
+    # Remove user login items from the GUI session.
+    if launchctl asuser "$current_uid" sudo -u "$current_user" osascript \
+        -e 'tell application "System Events" to delete every login item' >/dev/null 2>&1; then
+        removed_login_items=1
     fi
 
-    if [[ "$had_error" -eq 1 ]]; then
-        return 1
+    # Disable known heavy user updaters/helpers if present.
+    local user_agent_dir="/Users/$current_user/Library/LaunchAgents"
+    local patterns=(
+        "com.google.keystone*.plist"
+        "com.adobe*.plist"
+        "com.microsoft.update*.plist"
+        "com.microsoft.OneDrive*.plist"
+        "com.dropbox*.plist"
+        "com.spotify*.plist"
+    )
+
+    local pattern
+    for pattern in "${patterns[@]}"; do
+        local plist
+        for plist in "$user_agent_dir"/$pattern; do
+            [[ -e "$plist" ]] || continue
+            local label
+            label="$(basename "$plist" .plist)"
+            launchctl bootout "gui/$current_uid" "$plist" >/dev/null 2>&1 || true
+            launchctl disable "gui/$current_uid/$label" >/dev/null 2>&1 || true
+            disabled_agents=$((disabled_agents + 1))
+        done
+    done
+
+    if [[ "$removed_login_items" -eq 1 ]]; then
+        print_ok "Cleared login items for user: $current_user"
+    else
+        print_info "Login items were not modified (likely no permission or no items)."
     fi
 
-    print_ok "Performance tweaks applied."
+    if [[ "$disabled_agents" -gt 0 ]]; then
+        print_ok "Disabled $disabled_agents known background updater/helper agents"
+    else
+        print_info "No known heavy background updater/helper agents found"
+    fi
+
     return 0
 }
 
-configure_apple_account_restrictions() {
-    local profile_id="com.lab.restrictions.apple-account"
-    local profile_file="/tmp/${profile_id}.mobileconfig"
-    local profiles_err="/tmp/${profile_id}.err"
-    local profile_uuid_payload="9E8D88F7-1E6A-4C80-BBCD-4B5C62784A10"
-    local profile_uuid_root="1A2F4E5C-11A7-47E1-8A27-13C2A4CF7E50"
+check_disk_headroom() {
+    local used_pct
+    local free_pct
 
-    print_info "Applying local Apple account and iCloud restrictions profile..."
-
-    cat > "$profile_file" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>PayloadContent</key>
-    <array>
-        <dict>
-            <key>PayloadType</key>
-            <string>com.apple.applicationaccess</string>
-            <key>PayloadVersion</key>
-            <integer>1</integer>
-            <key>PayloadIdentifier</key>
-            <string>${profile_id}.payload</string>
-            <key>PayloadUUID</key>
-            <string>${profile_uuid_payload}</string>
-            <key>PayloadDisplayName</key>
-            <string>Lab Apple Account Restrictions</string>
-
-            <key>allowAccountModification</key>
-            <false/>
-            <key>allowCloudDocumentSync</key>
-            <false/>
-            <key>allowCloudDesktopAndDocuments</key>
-            <false/>
-            <key>allowCloudKeychainSync</key>
-            <false/>
-            <key>allowCloudPhotoLibrary</key>
-            <false/>
-            <key>allowCloudMail</key>
-            <false/>
-            <key>allowCloudAddressBook</key>
-            <false/>
-            <key>allowCloudCalendar</key>
-            <false/>
-            <key>allowCloudReminders</key>
-            <false/>
-            <key>allowCloudBookmarks</key>
-            <false/>
-        </dict>
-    </array>
-    <key>PayloadDisplayName</key>
-    <string>Lab Apple Restrictions</string>
-    <key>PayloadIdentifier</key>
-    <string>${profile_id}</string>
-    <key>PayloadOrganization</key>
-    <string>Lab</string>
-    <key>PayloadRemovalDisallowed</key>
-    <false/>
-    <key>PayloadScope</key>
-    <string>System</string>
-    <key>PayloadType</key>
-    <string>Configuration</string>
-    <key>PayloadUUID</key>
-    <string>${profile_uuid_root}</string>
-    <key>PayloadVersion</key>
-    <integer>1</integer>
-</dict>
-</plist>
-EOF
-
-    if ! plutil -lint "$profile_file" >/dev/null 2>&1; then
-        print_warn "Generated restrictions profile is invalid XML/plist."
-        rm -f "$profile_file" "$profiles_err" >/dev/null 2>&1 || true
-        return 1
+    used_pct="$(df -Pk / | tail -n 1 | awk '{gsub(/%/,"",$5); print $5}')"
+    if [[ -z "$used_pct" || ! "$used_pct" =~ ^[0-9]+$ ]]; then
+        print_warn "Could not read disk usage for root volume."
+        return 0
     fi
 
-    sudo profiles remove -identifier "$profile_id" >/dev/null 2>&1 || true
-    if ! sudo profiles -I -F "$profile_file" > /dev/null 2>"$profiles_err"; then
-        if ! sudo profiles install -type configuration -path "$profile_file" > /dev/null 2>>"$profiles_err"; then
-            print_warn "Failed to install Apple account restrictions profile."
-            if [[ -s "$profiles_err" ]]; then
-                print_warn "profiles output: $(tail -n 1 "$profiles_err")"
-            fi
-            rm -f "$profile_file" "$profiles_err" >/dev/null 2>&1 || true
-            return 1
-        fi
+    free_pct=$((100 - used_pct))
+    print_info "Disk free space on /: ${free_pct}%"
+
+    if [[ "$free_pct" -lt 20 ]]; then
+        print_warn "Disk free space is below 20%. Performance will degrade on older iMacs."
+        print_warn "Target is 20-25% free space."
+    elif [[ "$free_pct" -lt 25 ]]; then
+        print_warn "Disk free space is below preferred 25% headroom."
+    else
+        print_ok "Disk headroom is healthy (${free_pct}% free)."
     fi
 
-    rm -f "$profile_file" "$profiles_err" >/dev/null 2>&1 || true
-    print_ok "Apple account/iCloud restrictions profile installed."
+    return 0
+}
+
+disable_known_updater_services() {
+    local disabled=0
+    local system_patterns=(
+        "com.google.keystone*.plist"
+        "com.adobe*.plist"
+        "com.microsoft.update*.plist"
+    )
+
+    print_info "Disabling known non-critical updater services when found..."
+
+    local base_dir
+    for base_dir in "/Library/LaunchAgents" "/Library/LaunchDaemons"; do
+        local pattern
+        for pattern in "${system_patterns[@]}"; do
+            local plist
+            for plist in "$base_dir"/$pattern; do
+                [[ -e "$plist" ]] || continue
+                local label
+                label="$(basename "$plist" .plist)"
+                sudo launchctl bootout system "$plist" >/dev/null 2>&1 || true
+                sudo launchctl disable "system/$label" >/dev/null 2>&1 || true
+                disabled=$((disabled + 1))
+            done
+        done
+    done
+
+    if [[ "$disabled" -gt 0 ]]; then
+        print_ok "Disabled $disabled system updater service entries"
+    else
+        print_info "No known system updater service entries found"
+    fi
+
+    return 0
+}
+
+check_oclp_patch_status() {
+    local oclp_app=""
+
+    if [[ -d "/Applications/OpenCore-Patcher.app" ]]; then
+        oclp_app="/Applications/OpenCore-Patcher.app"
+    elif [[ -d "/Library/Application Support/Dortania/OpenCore-Patcher/OpenCore-Patcher.app" ]]; then
+        oclp_app="/Library/Application Support/Dortania/OpenCore-Patcher/OpenCore-Patcher.app"
+    fi
+
+    if [[ -z "$oclp_app" ]]; then
+        print_info "OpenCore Legacy Patcher not detected; skipping OCLP status check."
+        return 0
+    fi
+
+    print_info "OCLP detected: $oclp_app"
+    print_warn "After macOS updates, re-run OCLP post-install root patching to keep graphics/Wi-Fi acceleration stable."
+    print_info "Model: $(sysctl -n hw.model 2>/dev/null || echo unknown), macOS: $(sw_vers -productVersion 2>/dev/null || echo unknown)"
     return 0
 }

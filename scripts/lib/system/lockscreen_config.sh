@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Configure custom lockscreen/login window background
+# Best-effort lock screen/login window background customization
 # Works across macOS Monterey (12) through Sequoia (15)
 # Supports both SIP-enabled and SIP-disabled (OCLP) systems
+# Note: macOS does not expose a stable, separate lock-screen image API.
 
 apply_wallpaper_for_user() {
     local target_user="$1"
@@ -48,7 +49,7 @@ apply_lockscreen_cache_for_user() {
 configure_lockscreen_background() {
     local image_url="${LOCKSCREEN_IMAGE_URL:-https://wall.tasw.qzz.io/mac.png}"
     local image_file="/tmp/lockscreen_bg.png"
-    local persistent_dir="/Library/Application Support/Acidanthera"
+    local persistent_dir="/Library/Application Support/Atherion"
     local persistent_image="$persistent_dir/lockscreen_bg.png"
     local lock_plist="/Library/Preferences/com.apple.loginwindow"
     
@@ -92,8 +93,8 @@ configure_lockscreen_background() {
         _apply_lockscreen_sip_disabled "$persistent_image"
     fi
     
-    # Always set login window background (works with or without SIP)
-    print_info "Setting login window background..."
+    # Always set loginwindow-related image paths (works with or without SIP)
+    print_info "Applying loginwindow image paths..."
     
     # Copy to system location
     sudo cp "$persistent_image" /Library/Caches/com.apple.loginwindow/lockscreen_bg.png 2>/dev/null || true
@@ -116,26 +117,23 @@ configure_lockscreen_background() {
             print_warn "Could not update lockscreen cache for $current_user"
         fi
 
-        local set_wallpaper="${LOCKSCREEN_SET_WALLPAPER:-1}"
-        if [[ "${LOCKSCREEN_SKIP_WALLPAPER:-0}" == "1" ]]; then
-            set_wallpaper="0"
-        fi
+        local set_wallpaper="${LOCKSCREEN_SET_WALLPAPER:-0}"
 
         if [[ "$set_wallpaper" == "1" ]]; then
-            print_info "Updating desktop wallpaper (default enabled; set LOCKSCREEN_SKIP_WALLPAPER=1 to disable)..."
+            print_info "LOCKSCREEN_SET_WALLPAPER=1 provided; applying desktop wallpaper too..."
             if apply_wallpaper_for_user "$current_user" "$persistent_image"; then
                 print_info "Wallpaper updated for user: $current_user"
             else
                 print_warn "Could not update wallpaper in GUI session for $current_user"
             fi
         else
-            print_info "Desktop wallpaper unchanged (LOCKSCREEN_SKIP_WALLPAPER=1)."
+            print_info "Desktop wallpaper unchanged (lockscreen-only mode)."
         fi
     fi
 
     rm -f "$image_file"
-    print_info "Lockscreen update saved. It applies on next lock screen/reboot without logging out current users."
-    print_ok "Lockscreen background configured"
+    print_info "Best-effort lock-screen/loginwindow update saved. It applies on next lock screen/reboot without logging out current users."
+    print_ok "Lockscreen/loginwindow update configured"
     return 0
 }
 
@@ -169,14 +167,14 @@ _apply_lockscreen_sip_disabled() {
     print_ok "Lockscreen replacement applied (SIP disabled)"
 }
 
-# MDM profile approach for persistent cross-version lockscreen
+# MDM profile approach for loginwindow policy (no image payload key)
 create_lockscreen_mdm_profile() {
     local image_url="${LOCKSCREEN_IMAGE_URL:-https://wall.tasw.qzz.io/mac.png}"
     local profile_id="com.lab.lockscreen.background"
     local profile_file="/tmp/${profile_id}.mobileconfig"
     local profile_uuid="A7B2C3D4-E5F6-47G8-H9I0-J1K2L3M4N5O6"
     
-    print_info "Creating lockscreen MDM profile for Monterey-Sequoia..."
+    print_info "Creating loginwindow policy MDM profile for Monterey-Sequoia..."
     
     # Create MDM profile that sets login window properties
     cat > "$profile_file" <<'MDMEOF'
@@ -196,7 +194,7 @@ create_lockscreen_mdm_profile() {
             <key>PayloadUUID</key>
             <string>PAYLOAD_UUID_HERE</string>
             <key>PayloadDisplayName</key>
-            <string>Lockscreen Background</string>
+            <string>Login Window Policy</string>
             <key>PayloadEnabled</key>
             <true/>
             <key>PayloadOrganization</key>
@@ -223,7 +221,7 @@ create_lockscreen_mdm_profile() {
     </array>
     
     <key>PayloadDisplayName</key>
-    <string>Lab Lockscreen Configuration</string>
+    <string>Lab Login Window Configuration</string>
     <key>PayloadIdentifier</key>
     <string>com.lab.lockscreen.background</string>
     <key>PayloadRemovalDisallowed</key>
@@ -242,6 +240,6 @@ MDMEOF
 
     print_info "MDM profile created at $profile_file"
     print_info "To enroll: sudo profiles install -type configuration -path $profile_file"
-    print_ok "Lockscreen MDM profile ready"
+    print_ok "Loginwindow policy MDM profile ready"
     return 0
 }

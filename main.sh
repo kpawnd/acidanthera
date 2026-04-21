@@ -42,6 +42,10 @@ main() {
     run_step "Install Homebrew" install_homebrew
     run_step "Install Golang" ensure_go_installed
     run_step "Ensure runtime dependencies" ensure_runtime_dependencies
+    run_step "Optimize login/background items" optimize_login_and_background_items
+    run_step "Check disk headroom" check_disk_headroom
+    run_step "Disable known updater services" disable_known_updater_services
+    run_step "Check OCLP patch status" check_oclp_patch_status
     run_step "Report app versions" report_installed_app_versions
     run_step_interactive "Configure firmware password" configure_firmware_password
     run_step "Remove Deep Freeze / Faronics" remove_deepfreeze_and_faronics

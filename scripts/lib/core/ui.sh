@@ -53,28 +53,6 @@ normalize_stage_label() {
     printf '%s' "$normalized"
 }
 
-spinner_wait() {
-    local pid="$1"
-    local label="$2"
-    local frames='|/-\\'
-    local i=0
-
-    if [[ ! -t 1 ]]; then
-        wait "$pid"
-        return $?
-    fi
-
-    while kill -0 "$pid" >/dev/null 2>&1; do
-        printf "\r\033[2K${BLUE}[RUN]${NC} %s [%c]" "$label" "${frames:i++%${#frames}:1}"
-        sleep 0.12
-    done
-
-    wait "$pid"
-    local status=$?
-    clear_inline_status
-    return $status
-}
-
 spinner_wait_with_stages() {
     local pid="$1"
     local label="$2"
@@ -132,11 +110,3 @@ render_app_install_progress() {
     printf "\r\033[2K${BLUE}[INSTALL]${NC} [%s] %3d%% - %s" "$bar" "$pct" "$label"
 }
 
-announce_install_stage() {
-    local current="$1"
-    local total="$2"
-    local label="$3"
-
-    render_app_install_progress "$current" "$total" "$label"
-    printf "\n"
-}

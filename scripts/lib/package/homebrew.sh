@@ -151,7 +151,7 @@ resolve_go_pkg_url() {
 install_go_official_pkg() {
     local arch
     local pkg_url
-    local pkg_file="/tmp/acidanthera-go.pkg"
+    local pkg_file="/tmp/atherion-go.pkg"
     local file_size="0"
     local monitor_pid=""
 
@@ -240,7 +240,7 @@ persist_go_userland_env() {
     local target_user="$1"
     local target_home="$2"
     local profile_file="${target_home}/.zprofile"
-    local marker="# acidanthera-go-env"
+    local marker="# atherion-go-env"
 
     if [[ -f "$profile_file" ]] && grep -q "$marker" "$profile_file" 2>/dev/null; then
         return 0
@@ -262,7 +262,7 @@ EOF
 install_go_userland_tgz() {
     local arch
     local tgz_url
-    local tgz_file="/tmp/acidanthera-go.tgz"
+    local tgz_file="/tmp/atherion-go.tgz"
     local file_size="0"
     local monitor_pid=""
     local target_user
