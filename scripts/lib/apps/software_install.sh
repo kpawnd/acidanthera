@@ -128,9 +128,122 @@ install_cask_homebrew_only() {
     return 1
 }
 
-install_azure_data_studio_homebrew() {
+install_azure_data_studio_direct_download() {
     local stage_file="${1:-}"
-    install_cask_homebrew_only "azure-data-studio" "/Applications/Azure Data Studio.app" "Azure Data Studio" "$stage_file"
+    local download_url="https://download.microsoft.com/download/6b2bfeac-9c1b-4182-9a2f-ce86ff8cc371/azuredatastudio-macos-1.52.0.zip"
+    local app_path="/Applications/Azure Data Studio.app"
+    local zip_file="/tmp/azuredatastudio.zip"
+    local extract_dir="/tmp/azuredatastudio_extract"
+    local remote_size=""
+    local monitor_pid=""
+
+    if [[ -n "$stage_file" ]]; then
+        echo "Checking app" > "$stage_file"
+    fi
+
+    print_info "Installing Azure Data Studio..."
+
+    # Fast path: Check if app is already installed
+    if [[ -n "$(resolve_installed_app_path "$app_path")" ]]; then
+        print_ok "Azure Data Studio already installed. Skipping reinstall."
+        return 0
+    fi
+
+    # Clean up any prior partial downloads
+    rm -f "$zip_file" >/dev/null 2>&1 || true
+    rm -rf "$extract_dir" >/dev/null 2>&1 || true
+    mkdir -p "$extract_dir" || return 1
+
+    if [[ -n "$stage_file" ]]; then
+        echo "Resolving download URL" > "$stage_file"
+    fi
+    print_info "Resolving Azure Data Studio download URL..."
+
+    remote_size="$(get_remote_file_size "$download_url")" || {
+        print_warn "Failed to resolve Azure Data Studio download size."
+        return 1
+    }
+
+    if [[ -n "$stage_file" ]]; then
+        echo "Downloading Azure Data Studio" > "$stage_file"
+    fi
+    print_info "Downloading Azure Data Studio (approximately $(( remote_size / 1048576 ))MB)..."
+
+    # Background monitor for progress display
+    monitor_download_progress "$zip_file" "$stage_file" "Azure Data Studio" "$remote_size" &
+    monitor_pid=$!
+
+    # Download with resilience
+    if ! download_file_resilient "$download_url" "$zip_file"; then
+        kill $monitor_pid 2>/dev/null || true
+        wait $monitor_pid 2>/dev/null || true
+        print_warn "Failed to download Azure Data Studio."
+        return 1
+    fi
+
+    kill $monitor_pid 2>/dev/null || true
+    wait $monitor_pid 2>/dev/null || true
+
+    if [[ -n "$stage_file" ]]; then
+        echo "Extracting Azure Data Studio" > "$stage_file"
+    fi
+    print_info "Extracting Azure Data Studio..."
+
+    if ! unzip -q "$zip_file" -d "$extract_dir" 2>/dev/null; then
+        print_warn "Failed to extract Azure Data Studio ZIP."
+        rm -f "$zip_file" >/dev/null 2>&1 || true
+        rm -rf "$extract_dir" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if [[ -n "$stage_file" ]]; then
+        echo "Moving app to /Applications" > "$stage_file"
+    fi
+    print_info "Moving Azure Data Studio to /Applications..."
+
+    # Find and move the app bundle
+    local extracted_app
+    extracted_app="$(find "$extract_dir" -maxdepth 2 -type d -name 'Azure Data Studio.app' | head -n 1)"
+    if [[ -z "$extracted_app" ]]; then
+        print_warn "Azure Data Studio app not found in extracted ZIP."
+        rm -f "$zip_file" >/dev/null 2>&1 || true
+        rm -rf "$extract_dir" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    # Remove any old version first
+    if [[ -d "$app_path" ]]; then
+        if ! sudo -n rm -rf "$app_path" 2>/dev/null; then
+            sudo rm -rf "$app_path" 2>/dev/null || true
+        fi
+    fi
+
+    # Move to /Applications
+    if ! sudo -n mv "$extracted_app" "$app_path" 2>/dev/null; then
+        if ! sudo mv "$extracted_app" "$app_path" 2>/dev/null; then
+            print_warn "Failed to move Azure Data Studio to /Applications."
+            rm -f "$zip_file" >/dev/null 2>&1 || true
+            rm -rf "$extract_dir" >/dev/null 2>&1 || true
+            return 1
+        fi
+    fi
+
+    if [[ -n "$stage_file" ]]; then
+        echo "Verifying installation" > "$stage_file"
+    fi
+
+    # Cleanup
+    rm -f "$zip_file" >/dev/null 2>&1 || true
+    rm -rf "$extract_dir" >/dev/null 2>&1 || true
+
+    # Verify installation
+    if [[ -n "$(resolve_installed_app_path "$app_path")" ]]; then
+        print_ok "Azure Data Studio installed successfully."
+        return 0
+    else
+        print_warn "Azure Data Studio install completed but app not found at $app_path"
+        return 1
+    fi
 }
 
 # ============================================================================
@@ -353,7 +466,7 @@ install_required_software() {
     install_android_studio_homebrew "$stage_android" &
     spinner_wait_with_stages $! "Installing Android Studio" "$stage_android" || had_error=1
 
-    install_azure_data_studio_homebrew "$stage_azure" &
+    install_azure_data_studio_direct_download "$stage_azure" &
     spinner_wait_with_stages $! "Installing Azure Data Studio" "$stage_azure" || had_error=1
 
     install_packet_tracer "$stage_packet" &
