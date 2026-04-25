@@ -13,8 +13,11 @@ apply_wallpaper_for_user() {
         return 1
     fi
 
-    # If the user has an active GUI session, update the wallpaper live via osascript.
-    if launchctl print "user/$target_uid" >/dev/null 2>&1; then
+    # gui/<uid> only exists when the user is actively logged into a GUI session.
+    # user/<uid> is kept alive by launchd for all users regardless of login state —
+    # using that domain would always take the osascript path and silently fail for
+    # any user who is not currently at the login window.
+    if launchctl print "gui/$target_uid" >/dev/null 2>&1; then
         launchctl asuser "$target_uid" sudo -u "$target_user" osascript \
             -e 'tell application "System Events"' \
             -e 'tell every desktop to set picture to POSIX file "'"$image_path"'"' \
@@ -62,8 +65,11 @@ disable_screensaver_for_user() {
 
     # idleTime=0 disables the screen saver. Write to both the regular domain and
     # the ByHost domain (host-specific) since the latter takes precedence on macOS.
-    if launchctl print "user/$target_uid" >/dev/null 2>&1; then
-        # User has an active session — run defaults in their context.
+    # gui/<uid> only exists for actively logged-in GUI sessions; user/<uid> is always
+    # present on Ventura regardless of login state and would route all users through
+    # the launchctl asuser path, which silently fails for logged-out users.
+    if launchctl print "gui/$target_uid" >/dev/null 2>&1; then
+        # User has an active GUI session — run defaults in their context.
         launchctl asuser "$target_uid" sudo -u "$target_user" \
             defaults write com.apple.screensaver idleTime 0 >/dev/null 2>&1 || true
         launchctl asuser "$target_uid" sudo -u "$target_user" \
