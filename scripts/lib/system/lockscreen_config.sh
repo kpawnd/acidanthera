@@ -29,6 +29,32 @@ apply_wallpaper_for_user() {
         >/dev/null 2>&1
 }
 
+disable_screensaver_for_user() {
+    local target_user="$1"
+    local target_uid
+
+    target_uid="$(id -u "$target_user" 2>/dev/null || true)"
+    if [[ -z "$target_uid" ]]; then
+        return 1
+    fi
+
+    # idleTime=0 disables the screen saver. Write to both the regular domain and
+    # the ByHost domain (host-specific) since the latter takes precedence on macOS.
+    if launchctl print "user/$target_uid" >/dev/null 2>&1; then
+        # User has an active session — run defaults in their context.
+        launchctl asuser "$target_uid" sudo -u "$target_user" \
+            defaults write com.apple.screensaver idleTime 0 >/dev/null 2>&1 || true
+        launchctl asuser "$target_uid" sudo -u "$target_user" \
+            defaults -currentHost write com.apple.screensaver idleTime 0 >/dev/null 2>&1 || true
+    else
+        # User not logged in — write directly to their preferences.
+        sudo -u "$target_user" \
+            defaults write com.apple.screensaver idleTime 0 >/dev/null 2>&1 || true
+        sudo -u "$target_user" \
+            defaults -currentHost write com.apple.screensaver idleTime 0 >/dev/null 2>&1 || true
+    fi
+}
+
 apply_lockscreen_cache_for_user() {
     local target_user="$1"
     local image_path="$2"
@@ -237,6 +263,11 @@ configure_lockscreen_background() {
                 failed_checks=$((failed_checks + 1))
             fi
         fi
+
+        # Disable screen saver so it does not replace the wallpaper after login.
+        disable_screensaver_for_user "$target_user" && \
+            print_ok "Screen saver disabled for $target_user" || \
+            print_warn "Could not disable screen saver for $target_user"
     done < <(list_lockscreen_target_users)
 
     if [[ "$applied_any" -eq 0 ]]; then
