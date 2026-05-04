@@ -1,2 +1,4 @@
 .env
 .*
+/PKG/
+AGENTS.md
